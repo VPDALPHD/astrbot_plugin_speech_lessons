@@ -3,6 +3,7 @@
 ![封面](logo.png)
 
 > 作者：**VPDALPHD，DS_CHAN** ｜ 许可证 MIT ｜ 仓库 <https://github.com/VPDALPHD/astrbot_plugin_speech_lessons>
+> 版本历史见 [CHANGELOG.md](CHANGELOG.md)（也显示在面板「插件详情 → 更新日志」）
 
 ## 面板可视化视图（v2.2.0）
 
