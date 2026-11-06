@@ -37,11 +37,26 @@ from . import learner as learner_mod
 from .store import CardStore, norm_key
 
 PLUGIN_NAME = "astrbot_plugin_speech_lessons"
-INJECT_MARKER = "<!--speech_cards-->"
+# 说话卡以「临时用户内容片段」注入本轮请求：只发给模型、不写会话历史，
+# 且不触碰 system_prompt（它必须跨轮稳定，否则服务端前缀缓存全部失效）。
+INJECT_HEADER = "【说话卡参考 · 主人在私聊里教的口气示范】"
 MAX_TASK_KEEP = 16
 REPLY_CACHE_TTL = 1800.0
 REPLY_CACHE_MAX = 64
 CLAIM_TTL = 240.0
+
+
+def _get_text_part():
+    """延迟取 TextPart。
+
+    TextPart 在 astrbot.core.* 内部模块，不是公共 API；缺这个机制时（老版本）
+    本轮就不注入，绝不回退去改 system_prompt。
+    """
+    try:
+        from astrbot.core.agent.message import TextPart
+    except Exception:  # pragma: no cover - 取决于 AstrBot 版本
+        return None
+    return TextPart
 
 
 class SpeechLessonsPlugin(Star):
@@ -521,6 +536,13 @@ class SpeechLessonsPlugin(Star):
 
     @filter.on_llm_request(priority=-100)
     async def inject_cards(self, event: AstrMessageEvent, req: Any):
+        """把说话卡作为「临时用户内容片段」注入本轮请求。
+
+        为什么不写 system_prompt：system_prompt 是模型收到的第一条消息，
+        每轮往里塞会变的说话卡会让服务端前缀缓存全部失效，也破坏
+        「系统提示词 = 稳定人格」的分层。改用 req.extra_user_content_parts +
+        mark_as_temp()：片段并在本轮 user 内容之后，且打上 _no_save 不落盘。
+        """
         if not self._enabled() or not bool(self._cfg("inject_enabled", True)):
             return
         text = str(getattr(event, "message_str", "") or "")
@@ -536,24 +558,13 @@ class SpeechLessonsPlugin(Star):
         if not picked and not note:
             return
 
-        block = ""
-        if picked:
-            lines = [
-                learner_mod.render_card(card, i) for i, card in enumerate(picked, 1)
-            ]
-            block = (
-                f"\n\n{INJECT_MARKER}\n"
-                "【说话卡 · 主人在私聊里亲自教的口气示范，遇到同类场面照着这个口气来】\n"
-                + "\n".join(lines)
-                + "\n（只是口气参考：别逐字复述例子，也别提到这些卡本身。）"
+        block = self._render_inject_block(picked, note)
+        if not block:
+            return
+        if not self._append_temp_part(req, block):
+            logger.debug(
+                "[speech_lessons] 当前 AstrBot 不支持 extra_user_content_parts，本轮不注入"
             )
-        if note and bool(self._cfg("confirm_note", True)):
-            block += f"\n【本轮附注】{note}"
-
-        try:
-            req.system_prompt = (getattr(req, "system_prompt", "") or "") + block
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[speech_lessons] 注入失败: %s", exc)
             return
 
         if picked:
@@ -562,6 +573,44 @@ class SpeechLessonsPlugin(Star):
                 self.store.touch([card.id for card in picked])
             except Exception:
                 pass
+
+    def _render_inject_block(self, picked: list[Any], note: str) -> str:
+        parts: list[str] = []
+        if picked:
+            lines = [
+                learner_mod.render_card(card, i) for i, card in enumerate(picked, 1)
+            ]
+            parts.append(
+                f"{INJECT_HEADER}\n"
+                + "\n".join(lines)
+                + "\n（只是口气参考：别逐字复述例子，也别提到这些卡本身。）"
+            )
+        if note and bool(self._cfg("confirm_note", True)):
+            parts.append(f"【本轮附注】{note}")
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _append_temp_part(req: Any, block: str) -> bool:
+        """把文本块追加成本轮临时内容片段；返回是否成功。"""
+        text_part_cls = _get_text_part()
+        if text_part_cls is None:
+            return False
+        parts = getattr(req, "extra_user_content_parts", None)
+        if not isinstance(parts, list):
+            return False
+        try:
+            part = text_part_cls(text=block)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[speech_lessons] 构造临时片段失败: %s", exc)
+            return False
+        mark = getattr(part, "mark_as_temp", None)
+        if callable(mark):
+            try:
+                mark()
+            except Exception as exc:  # noqa: BLE001 - 标记失败仍可注入，只是会进历史
+                logger.debug("[speech_lessons] 临时标记失败: %s", exc)
+        parts.append(part)
+        return True
 
     # ============================================================ 面板 Web API
     def _register_web_apis(self) -> None:

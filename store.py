@@ -11,13 +11,14 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable
+
+from astrbot.api import logger
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
@@ -118,7 +119,7 @@ class CardStore:
             )
             self._conn.commit()
             if cur.rowcount:
-                logging.getLogger(__name__).info(
+                logger.info(
                     "[speech_lessons] 旧版 lessons 归档 %d 条（v2 不再使用）",
                     cur.rowcount,
                 )

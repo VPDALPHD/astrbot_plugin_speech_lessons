@@ -148,6 +148,13 @@ AstrBot 的消息处理器按 priority 降序执行，且**任何一个 handler 
 按 `权重 + 复习到期(+0.3) + 场景词命中当前消息(+0.6)` 排序，
 取前 `inject_max_cards`（默认 3）张、总字数不超过 `inject_max_chars`（默认 900）。
 
+注入通道用 **`req.extra_user_content_parts` + `TextPart(...).mark_as_temp()`**：
+片段并进本轮 user 内容之后、只发给模型，并且**不写会话历史**；
+
+- 不改 `req.system_prompt` —— 它必须跨轮稳定，否则服务端前缀缓存（prompt caching）每轮都失效；
+- 不拼 `req.prompt` —— 那会随本轮 user 消息落进历史，每轮叠加一份；
+- 需要 AstrBot **≥ 4.24.2**（`mark_as_temp` 自该版本起提供）；老版本上本插件不注入（只学不用），**不会回退去改 system_prompt**。
+
 ## 工具（她可以自己调）
 
 | 工具 | 用途 |

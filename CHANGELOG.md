@@ -3,6 +3,39 @@
 > 完整迭代记录。本文件同时显示在 AstrBot 面板「插件详情 → 更新日志」。
 > 作者：VPDALPHD，DS_CHAN ｜ 许可证：MIT
 
+## v2.3.0（2026-11-07）
+
+### 修复：插件市场自动审核驳回的两项
+
+上架自动安全检查（无恶意行为，纯规范问题）指出两处，均已改：
+
+1. **日志来源违规** —— `store.py` 用了 Python 内置 `logging`（`import logging` + `logging.getLogger()`）。
+   规定要求只能用 `from astrbot.api import logger`。已改为统一走 AstrBot 的 logger。
+2. **注入方式不当** —— 每轮把会变的说话卡追加进 `req.system_prompt`，会让**服务端前缀缓存失效**
+   （system prompt 是模型收到的第一条消息，逐轮变动等于每轮缓存全丢）。
+   改为官方推荐做法：`req.extra_user_content_parts` + `TextPart(...).mark_as_temp()`。
+
+### 注入通道变更
+
+- 说话卡改为**临时用户内容片段**：并在本轮 user 内容之后、只发给模型
+- `mark_as_temp()` 打 `_no_save` 标记 → **不写入会话历史**（不然每轮叠加一份）
+- **完全不触碰 `req.system_prompt`**（代码里已无任何 system_prompt 赋值）
+- 若宿主不支持该机制，则**本轮不注入**（只学不用），绝不回退去改 system_prompt
+
+### 兼容性
+
+- `astrbot_version` 由 `>=4.22,<5` 提升为 **`>=4.24.2,<5`**
+  - 原因：`extra_user_content_parts` 自 4.10.3 就有，但 `mark_as_temp()` 是 **4.24.2** 才加的；
+    卡在 4.22~4.24.1 上注入会每轮写进历史，比不写更糟
+- 功能不变：照旧是「学 → 注入 → 按反馈复习」，只是换了更规范、对缓存友好的通道
+
+### 验证
+
+- 自检 54 项全 PASS，其中新增：走 `extra_user_content_parts` 注入、片段带 `_no_save`、
+  **`system_prompt` 保持原样**、不支持时既不注入也不记录"本轮用过"（避免反馈误降权）
+
+---
+
 ## v2.2.1（2026-11-06）
 
 ### 文档
