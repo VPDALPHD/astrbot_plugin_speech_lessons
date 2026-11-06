@@ -38,6 +38,13 @@ desc: |
 version: 2.1.0
 author: VPDALPHD
 repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
+social_link: "https://github.com/VPDALPHD"
+tags:
+  - 教说话
+  - 风格学习
+  - 拟人化
+  - 陪伴
+  - 人格
 support_platforms:
   - aiocqhttp
 astrbot_version: ">=4.22,<5"
