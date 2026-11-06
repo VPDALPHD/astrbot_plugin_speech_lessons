@@ -1,0 +1,21 @@
+name: astrbot_plugin_speech_lessons
+display_name: 教我说话
+short_desc: 在私聊里被纠正一次，它就记住这个说法
+desc: |
+  让 AI 在私聊里被你"教说话"，并把教会的规矩长期记住。
+
+  - **只认主人**：只有 owner_ids 里的 QQ 能在私聊里教，群里教一律不学。
+  - **不靠固定句式**：强信号本地直接学，模糊的交给模型判定，闲聊不烧钱。
+  - **规则优先**：先用正则抽「该怎么说 / 不该怎么说」，抽不到再让模型提炼。
+  - **写进受信任位**：规矩注入 system_prompt，比普通记忆更有约束力。
+  - **真复习**：只有你明确说"对/就是这样"才推进间隔，说"还是不对"就回退；不做"注入即复习成功"的伪复习。
+  - **会淡忘**：久没用又没反馈的规矩权重慢慢掉，跌破阈值自动归档。
+
+  数据存在 data/plugin_data/astrbot_plugin_speech_lessons/lessons.db，
+  指令：/教 列表、/教 删 3、/教 清、/教 关、/教 开、/教 测试 <话>
+version: 1.0.0
+author: VPDALPHD
+repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.22,<5"

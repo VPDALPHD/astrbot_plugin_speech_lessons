@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+data/
+.venv/
+venv/
+.env
+.gh_token
+.gh_token.*
+*.log

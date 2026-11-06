@@ -1,0 +1,92 @@
+{
+  "enabled": {
+    "description": "总开关。关掉后既不学习也不注入",
+    "type": "bool",
+    "default": true
+  },
+  "owner_ids": {
+    "description": "允许教它的 QQ 号，多个用英文逗号分隔。只有这些人的私聊消息才算教学；留空则只认 AstrBot 管理员",
+    "type": "string",
+    "default": ""
+  },
+  "capture_enabled": {
+    "description": "是否在私聊里自动识别“在教”的消息",
+    "type": "bool",
+    "default": true
+  },
+  "judge_enabled": {
+    "description": "模糊消息是否交给模型判定（强信号消息不调模型，直接本地学）",
+    "type": "bool",
+    "default": true
+  },
+  "judge_provider_id": {
+    "description": "用于判定的模型 Provider ID，留空则用当前会话默认模型",
+    "type": "string",
+    "default": ""
+  },
+  "judge_timeout_seconds": {
+    "description": "模型判定超时（秒），超时就当没在教，不影响聊天",
+    "type": "float",
+    "default": 8.0
+  },
+  "min_confidence": {
+    "description": "模型判定为“在教”的最低置信度，低于此值不学",
+    "type": "float",
+    "default": 0.5
+  },
+  "default_scene": {
+    "description": "新规矩的生效范围。all=所有会话通用（推荐）",
+    "type": "string",
+    "default": "all"
+  },
+  "new_rule_weight": {
+    "description": "新规矩的初始权重，越大越优先被注入",
+    "type": "float",
+    "default": 1.5
+  },
+  "max_rule_chars": {
+    "description": "单条规矩的字数上限",
+    "type": "int",
+    "default": 200
+  },
+  "max_rules": {
+    "description": "最多同时保留多少条生效规矩，到上限后不再学习新规矩",
+    "type": "int",
+    "default": 300
+  },
+  "inject_enabled": {
+    "description": "是否把规矩注入每轮对话",
+    "type": "bool",
+    "default": true
+  },
+  "inject_max_rules": {
+    "description": "每轮最多注入几条规矩",
+    "type": "int",
+    "default": 8
+  },
+  "inject_max_chars": {
+    "description": "每轮注入规矩的总字数上限",
+    "type": "int",
+    "default": 700
+  },
+  "scan_rules": {
+    "description": "每轮从数据库读取多少条候选规矩（再按权重挑选注入）",
+    "type": "int",
+    "default": 200
+  },
+  "confirm_note": {
+    "description": "刚学完一轮时，是否在提示里附一句让 AI 自然接受、不辩解",
+    "type": "bool",
+    "default": true
+  },
+  "decay_per_day": {
+    "description": "闲置衰减：规矩每天掉多少权重（0 表示不衰减）",
+    "type": "float",
+    "default": 0.02
+  },
+  "archive_weight": {
+    "description": "权重跌到这个值以下就归档（不再注入）",
+    "type": "float",
+    "default": 0.3
+  }
+}
