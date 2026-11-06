@@ -1,4 +1,4 @@
-﻿name: astrbot_plugin_speech_lessons
+name: astrbot_plugin_speech_lessons
 display_name: 教我说话
 short_desc: 私聊教一次，它就学会那个口气（说话卡 + 看图学）
 desc: |
@@ -19,6 +19,7 @@ desc: |
   - **真复习**：只有你明确说"对/就是这样"才推进间隔，说"还是不对"就回退降权；
     不做"注入即复习成功"的伪复习。
   - **会淡忘**：久没用又没反馈的卡权重慢慢掉，跌破阈值自动归档。
+  - **面板可管**：自带可视化视图，能看卡片、搜索、手动增删改，改完下一轮立刻生效。
 
   数据存在 data/plugin_data/astrbot_plugin_speech_lessons/lessons.db（表 cards）。
   指令：/教 列表、/教 学 <原话>、/教 删 3、/教 清、/教 关、/教 开、/教 测试 <话>
@@ -35,7 +36,7 @@ desc: |
   - 主动消息 (Proactive Chat) v1.3.0-beta.1、QQ 消息内容归一化 1.0.1、QQ 能力增强 1.15.2
   - astrbot_plugin_blacklist_tools v1.6（该插件无中文名，面板按包名显示）
   共 16 个插件同时启用的环境下测过；工具名、指令名与上述插件均无冲突。
-version: 2.1.1
+version: 2.2.0
 author: VPDALPHD
 repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
 social_link: "https://github.com/VPDALPHD"

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>说话卡面板</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="title-row">
+        <h1>说话卡面板</h1>
+        <span class="badge">教我说话</span>
+      </div>
+      <p class="sub">私聊里教它一次，这里就会多一张卡；下面的改动下一轮对话立刻生效。</p>
+      <div class="stats" id="stats"></div>
+    </header>
+
+    <section class="toolbar">
+      <input id="q" class="search" type="search" placeholder="搜索 场景 / 反例 / 正例 / 要点" />
+      <div class="seg" id="seg" role="tablist">
+        <button data-status="active" class="on">生效中</button>
+        <button data-status="archived">已归档</button>
+        <button data-status="all">全部</button>
+      </div>
+      <button id="new-btn" class="primary">＋ 新建卡片</button>
+    </section>
+
+    <main id="list" class="list">
+      <div class="empty">加载中…</div>
+    </main>
+
+    <div id="mask" class="mask hidden">
+      <div class="dialog" role="dialog" aria-modal="true">
+        <div class="dialog-head">
+          <h2 id="dlg-title">新建说话卡</h2>
+          <button id="dlg-close" class="icon" title="关闭">✕</button>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span>场景 <em>什么时候用（可留空 = 通用）</em></span>
+            <input id="f-scene" type="text" placeholder="例：对方说“难绷”在抱怨时" />
+          </label>
+          <label class="field">
+            <span>反例 <em>别这么说（原文）</em></span>
+            <textarea id="f-bad" rows="2" placeholder="例：难绷啥呢"></textarea>
+          </label>
+          <label class="field">
+            <span>正例 <em>该这么说（原文）</em></span>
+            <textarea id="f-good" rows="2" placeholder="例：绷不住了"></textarea>
+          </label>
+          <label class="field">
+            <span>要点 <em>一句照做就行的话</em></span>
+            <textarea id="f-principle" rows="2" placeholder="例：接梗式短句，别反问，别解释"></textarea>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>标签 <em>逗号分隔</em></span>
+              <input id="f-tags" type="text" placeholder="接梗,语气" />
+            </label>
+            <label class="field narrow">
+              <span>权重 <em>越高越优先注入</em></span>
+              <input id="f-weight" type="number" step="0.1" min="0" max="5" value="1.5" />
+            </label>
+          </div>
+          <p class="hint">反例和正例至少填一个。留空的那个不会显示在注入里。</p>
+        </div>
+        <div class="dialog-foot">
+          <span id="dlg-err" class="err"></span>
+          <button id="dlg-cancel" class="ghost">取消</button>
+          <button id="dlg-save" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

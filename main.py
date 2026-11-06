@@ -22,6 +22,16 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image as MsgImage
 from astrbot.api.star import Context, Star, StarTools
 
+try:  # 面板可视化视图用的 Web API 助手（AstrBot 新版本提供）
+    from astrbot.api.web import error_response, json_response, request
+
+    _WEB_OK = True
+except Exception:  # noqa: BLE001 - 老版本没有这套 API 时，插件其余功能照常
+    error_response = None  # type: ignore[assignment]
+    json_response = None  # type: ignore[assignment]
+    request = None  # type: ignore[assignment]
+    _WEB_OK = False
+
 from . import judge as judge_mod
 from . import learner as learner_mod
 from .store import CardStore, norm_key
@@ -51,6 +61,8 @@ class SpeechLessonsPlugin(Star):
         self._learn_tasks: set[asyncio.Task] = set()
         self._maint_task: asyncio.Task | None = None
         self._last_decay_at = 0.0
+
+        self._register_web_apis()
 
         logger.info(
             "[speech_lessons] v2 已加载，说话卡=%d，数据目录=%s",
@@ -550,6 +562,124 @@ class SpeechLessonsPlugin(Star):
                 self.store.touch([card.id for card in picked])
             except Exception:
                 pass
+
+    # ============================================================ 面板 Web API
+    def _register_web_apis(self) -> None:
+        if not _WEB_OK:
+            logger.debug("[speech_lessons] 当前 AstrBot 没有 astrbot.api.web，跳过面板 API")
+            return
+        apis = [
+            (f"/{PLUGIN_NAME}/cards", self.page_list_cards, ["GET"], "教说话：列出说话卡"),
+            (f"/{PLUGIN_NAME}/cards/save", self.page_save_card, ["POST"], "教说话：新建/修改说话卡"),
+            (f"/{PLUGIN_NAME}/cards/<card_id>/archive", self.page_archive_card, ["POST"], "教说话：归档说话卡"),
+            (f"/{PLUGIN_NAME}/cards/<card_id>/restore", self.page_restore_card, ["POST"], "教说话：恢复说话卡"),
+            (f"/{PLUGIN_NAME}/cards/<card_id>/delete", self.page_delete_card, ["POST"], "教说话：彻底删除说话卡"),
+        ]
+        for route, handler, methods, desc in apis:
+            try:
+                self.context.register_web_api(route, handler, methods, desc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[speech_lessons] 面板 API 注册失败 %s: %s", route, exc)
+        logger.info("[speech_lessons] 面板 API 已注册 %d 个", len(apis))
+
+    async def page_list_cards(self):
+        status = str(request.query.get("status", "active") or "active")
+        keyword = str(request.query.get("q", "") or "").strip()
+        try:
+            limit = int(request.query.get("limit", 300) or 300)
+        except (TypeError, ValueError):
+            limit = 300
+        try:
+            items = self.store.query(
+                status=status, keyword=keyword, limit=max(1, min(limit, 500))
+            )
+            return json_response(
+                {"ok": True, "items": items, "stats": self.store.stats()}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[speech_lessons] 面板读取失败: %s", exc)
+            return error_response(f"读取失败：{exc}", status_code=500)
+
+    async def page_save_card(self):
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        good = str(payload.get("good") or "").strip()
+        bad = str(payload.get("bad") or "").strip()
+        principle = str(payload.get("principle") or "").strip()
+        if not good and not bad:
+            return error_response("正例和反例至少要填一个")
+        max_chars = int(self._cfg("card_max_chars", 120))
+        for label, value in (("场景", payload.get("scene")), ("反例", bad), ("正例", good), ("要点", principle)):
+            if len(str(value or "")) > max_chars * 2:
+                return error_response(f"{label}太长了（上限 {max_chars * 2} 字）")
+        status = str(payload.get("status") or "active")
+        if status not in ("active", "archived"):
+            status = "active"
+
+        raw_id = payload.get("id")
+        if raw_id not in (None, "", 0, "0"):
+            try:
+                card_id = int(raw_id)
+            except (TypeError, ValueError):
+                return error_response("id 不合法")
+            ok = self.store.update_fields(
+                card_id,
+                {
+                    "scene": payload.get("scene", ""),
+                    "bad": bad,
+                    "good": good,
+                    "principle": principle,
+                    "tags": payload.get("tags", []),
+                    "weight": payload.get("weight", 1.5),
+                    "status": status,
+                },
+            )
+            if not ok:
+                return error_response("没找到这张卡（可能已被删除）", status_code=404)
+            return json_response({"ok": True, "id": card_id, "created": False})
+
+        card_id, created = self.store.add(
+            scene=str(payload.get("scene") or "").strip(),
+            bad=bad,
+            good=good,
+            principle=principle,
+            tags=payload.get("tags") or [],
+            confidence=0.9,
+            source="panel",
+            weight=float(payload.get("weight") or 1.5),
+            raw_text="面板手动创建",
+        )
+        if not card_id:
+            return error_response("保存失败：正例/反例不能都为空")
+        if status != "active":
+            self.store.update_fields(card_id, {"status": status})
+        return json_response({"ok": True, "id": card_id, "created": created})
+
+    async def page_archive_card(self, card_id: str):
+        return self._card_action(card_id, "archive")
+
+    async def page_restore_card(self, card_id: str):
+        return self._card_action(card_id, "restore")
+
+    async def page_delete_card(self, card_id: str):
+        return self._card_action(card_id, "delete")
+
+    def _card_action(self, card_id: str, action: str):
+        try:
+            target = int(str(card_id).strip())
+        except (TypeError, ValueError):
+            return error_response("卡片 id 不合法")
+        if action == "archive":
+            ok = self.store.archive(target)
+        elif action == "restore":
+            ok = self.store.restore(target)
+        else:
+            ok = self.store.delete(target)
+        if not ok:
+            return error_response("没找到这张卡", status_code=404)
+        label = {"archive": "已归档", "restore": "已恢复", "delete": "已删除"}[action]
+        return json_response({"ok": True, "message": label})
 
     # ================================================================== 工具
     @filter.llm_tool(name="learn_speech_style")

@@ -239,6 +239,129 @@ class CardStore:
             ).fetchone()
             return int(row["c"] if row else 0)
 
+    # ------------------------------------------------------- 面板用：查询/改
+    _EDITABLE = ("scene", "bad", "good", "principle", "tags", "weight", "status")
+
+    def query(self, status: str = "active", keyword: str = "", limit: int = 300) -> list[dict]:
+        """面板列卡。status=active/archived/all，keyword 模糊搜所有文本字段。"""
+        sql = "SELECT * FROM cards WHERE 1=1"
+        args: list[Any] = []
+        if status in ("active", "archived"):
+            sql += " AND status=?"
+            args.append(status)
+        if keyword:
+            like = f"%{keyword}%"
+            sql += (
+                " AND (scene LIKE ? OR bad LIKE ? OR good LIKE ? OR principle LIKE ?"
+                " OR tags LIKE ?)"
+            )
+            args.extend([like] * 5)
+        sql += " ORDER BY (status='active') DESC, weight DESC, id DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+            return [self._to_dict(r) for r in rows]
+
+    @staticmethod
+    def _to_dict(row: sqlite3.Row) -> dict:
+        try:
+            tags = json.loads(row["tags"] or "[]")
+        except Exception:
+            tags = []
+        keys = (
+            "id", "scene", "bad", "good", "principle", "confidence", "source",
+            "weight", "status", "created_at", "updated_at", "last_used_at",
+            "use_count", "review_reps", "review_ef", "review_interval",
+            "next_review_at", "feedback_up", "feedback_down", "raw_text",
+        )
+        data = {k: row[k] for k in keys if k in row.keys()}
+        data["tags"] = [str(t) for t in tags if str(t).strip()]
+        return data
+
+    def update_fields(self, card_id: int, fields: dict) -> bool:
+        """面板保存。只接受白名单字段；改了 scene/bad/good 会重算指纹。"""
+        sets: list[str] = []
+        args: list[Any] = []
+        for key in self._EDITABLE:
+            if key not in fields:
+                continue
+            value = fields[key]
+            if key == "tags":
+                if not isinstance(value, list):
+                    value = [t for t in str(value or "").replace("，", ",").split(",") if t.strip()]
+                value = json.dumps([str(t).strip() for t in value if str(t).strip()], ensure_ascii=False)
+            elif key == "weight":
+                try:
+                    value = max(0.0, min(5.0, float(value)))
+                except (TypeError, ValueError):
+                    continue
+            elif key == "status":
+                if value not in ("active", "archived"):
+                    continue
+            else:
+                value = str(value or "")[:400]
+            sets.append(f"{key}=?")
+            args.append(value)
+        if not sets:
+            return False
+        now = time.time()
+        sets.append("updated_at=?")
+        args.append(now)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT scene, bad, good FROM cards WHERE id=?", (card_id,)
+            ).fetchone()
+            if not row:
+                return False
+            scene = fields.get("scene", row["scene"])
+            bad = fields.get("bad", row["bad"])
+            good = fields.get("good", row["good"])
+            sets.append("card_fp=?")
+            args.append(card_fp(scene, bad, good))
+            args.append(int(card_id))
+            cur = self._conn.execute(
+                f"UPDATE cards SET {', '.join(sets)} WHERE id=?", args
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def restore(self, card_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE cards SET status='active', updated_at=? WHERE id=?",
+                (time.time(), card_id),
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def delete(self, card_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM cards WHERE id=?", (card_id,))
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def stats(self) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total,"
+                " SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active,"
+                " SUM(CASE WHEN status='archived' THEN 1 ELSE 0 END) AS archived,"
+                " COALESCE(SUM(use_count),0) AS uses,"
+                " COALESCE(AVG(CASE WHEN status='active' THEN weight END),0) AS avg_weight,"
+                " COALESCE(SUM(feedback_up),0) AS up,"
+                " COALESCE(SUM(feedback_down),0) AS down"
+                " FROM cards"
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "active": int(row["active"] or 0),
+            "archived": int(row["archived"] or 0),
+            "uses": int(row["uses"] or 0),
+            "avg_weight": round(float(row["avg_weight"] or 0), 2),
+            "feedback_up": int(row["up"] or 0),
+            "feedback_down": int(row["down"] or 0),
+        }
+
     # ------------------------------------------------------------------ 调度
     def touch(self, ids: Iterable[int]) -> None:
         """记一次"用过"。只累计使用次数，不推进复习间隔。"""
