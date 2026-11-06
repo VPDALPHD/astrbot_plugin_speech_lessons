@@ -1,4 +1,4 @@
-name: astrbot_plugin_speech_lessons
+﻿name: astrbot_plugin_speech_lessons
 display_name: 教我说话
 short_desc: 私聊教一次，它就学会那个口气（说话卡 + 看图学）
 desc: |
@@ -37,7 +37,7 @@ desc: |
   - astrbot_plugin_blacklist_tools v1.6（该插件无中文名，面板按包名显示）
   共 16 个插件同时启用的环境下测过；工具名、指令名与上述插件均无冲突。
 version: 2.2.0
-author: VPDALPHD
+author: "VPDALPHD，DS_CHAN"
 repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
 social_link: "https://github.com/VPDALPHD"
 tags:

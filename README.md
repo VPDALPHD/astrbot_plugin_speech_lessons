@@ -2,6 +2,8 @@
 
 ![封面](logo.png)
 
+> 作者：**VPDALPHD，DS_CHAN** ｜ 许可证 MIT ｜ 仓库 <https://github.com/VPDALPHD/astrbot_plugin_speech_lessons>
+
 ## 面板可视化视图（v2.2.0）
 
 插件自带一个管理面板，重载插件后出现在 WebUI 左侧 **「扩展功能 → 插件视图 → 教我说话」**
