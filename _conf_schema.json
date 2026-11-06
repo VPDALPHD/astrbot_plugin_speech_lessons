@@ -10,67 +10,82 @@
     "default": ""
   },
   "capture_enabled": {
-    "description": "是否在私聊里自动识别“在教”的消息",
+    "description": "私聊里是否自动识别“在教”的消息（兜底通道，模型自己没调工具时也能学到）",
     "type": "bool",
     "default": true
   },
-  "judge_enabled": {
-    "description": "模糊消息是否交给模型判定（强信号消息不调模型，直接本地学）",
+  "learn_enabled": {
+    "description": "是否允许她自己调用 learn_speech_style 工具来学说话",
     "type": "bool",
     "default": true
   },
-  "judge_provider_id": {
-    "description": "用于判定的模型 Provider ID，留空则用当前会话默认模型",
+  "learn_provider_id": {
+    "description": "提炼说话卡用的模型 Provider ID，留空=当前会话默认模型。图片范例需要多模态模型",
     "type": "string",
     "default": ""
   },
-  "judge_timeout_seconds": {
-    "description": "模型判定超时（秒），超时就当没在教，不影响聊天",
+  "learn_api_base": {
+    "description": "【可选】直连模型接口的 Base URL（如 https://api.deepseek.com/v1）。填了这一项且填了模型名，就绕过 AstrBot provider 直连",
+    "type": "string",
+    "default": ""
+  },
+  "learn_api_key": {
+    "description": "【可选】直连接口的 API Key，只在填了 Base URL 和模型名时使用",
+    "type": "string",
+    "default": ""
+  },
+  "learn_model": {
+    "description": "【可选】直连接口的模型名，如 deepseek-chat；留空则用 AstrBot 自带 provider",
+    "type": "string",
+    "default": ""
+  },
+  "learn_timeout_seconds": {
+    "description": "提炼超时（秒），超时就不学，不影响聊天",
     "type": "float",
-    "default": 8.0
+    "default": 15.0
+  },
+  "vision_enabled": {
+    "description": "主人发图片（聊天截图/范例）时是否看图提炼。关掉则只按文字学",
+    "type": "bool",
+    "default": true
   },
   "min_confidence": {
     "description": "模型判定为“在教”的最低置信度，低于此值不学",
     "type": "float",
-    "default": 0.5
+    "default": 0.55
   },
-  "default_scene": {
-    "description": "新规矩的生效范围。all=所有会话通用（推荐）",
-    "type": "string",
-    "default": "all"
+  "card_max_chars": {
+    "description": "单张说话卡里 scene/bad/good/原则 各自的字数上限",
+    "type": "int",
+    "default": 120
   },
-  "new_rule_weight": {
-    "description": "新规矩的初始权重，越大越优先被注入",
-    "type": "float",
-    "default": 1.5
-  },
-  "max_rule_chars": {
-    "description": "单条规矩的字数上限",
+  "max_cards": {
+    "description": "最多同时保留多少张生效说话卡，到上限后不再学新的",
     "type": "int",
     "default": 200
   },
-  "max_rules": {
-    "description": "最多同时保留多少条生效规矩，到上限后不再学习新规矩",
-    "type": "int",
-    "default": 300
+  "new_card_weight": {
+    "description": "新说话卡的初始权重，越大越优先被注入",
+    "type": "float",
+    "default": 1.5
   },
   "inject_enabled": {
-    "description": "是否把规矩注入每轮对话",
+    "description": "是否把说话卡注入每轮对话",
     "type": "bool",
     "default": true
   },
-  "inject_max_rules": {
-    "description": "每轮最多注入几条规矩",
+  "inject_max_cards": {
+    "description": "每轮最多注入几张说话卡",
     "type": "int",
-    "default": 8
+    "default": 3
   },
   "inject_max_chars": {
-    "description": "每轮注入规矩的总字数上限",
+    "description": "每轮注入说话卡的总字数上限",
     "type": "int",
-    "default": 700
+    "default": 900
   },
-  "scan_rules": {
-    "description": "每轮从数据库读取多少条候选规矩（再按权重挑选注入）",
+  "scan_cards": {
+    "description": "每轮从数据库读取多少张候选卡（再按权重与场景匹配挑选注入）",
     "type": "int",
     "default": 200
   },
@@ -80,7 +95,7 @@
     "default": true
   },
   "decay_per_day": {
-    "description": "闲置衰减：规矩每天掉多少权重（0 表示不衰减）",
+    "description": "闲置衰减：说话卡每天掉多少权重（0 表示不衰减）",
     "type": "float",
     "default": 0.02
   },

@@ -1,14 +1,17 @@
-"""规则存储与复习调度（SM-2）。
+"""说话卡存储与复习调度（SM-2）。
 
 设计要点：
-- 规则（怎么说）和事实记忆（发生过什么）分开存，互不干扰；
+- 存的是「说话卡」不是「规则」：场景 / 反例 / 正例 / 一句原则，
+  注入时能渲染成"别人这么说 → 我该这么接"的对照，比祈使句更能改语气；
 - 复习推进只由「主人明确反馈」驱动，不做"注入即复习成功"那种伪复习；
-- 闲置衰减兜底：久没用又没反馈的规则权重慢慢掉，跌破阈值归档。
+- 闲置衰减兜底：久没用又没反馈的卡权重慢慢掉，跌破阈值归档；
+- v1.0.0 的 lessons 表保留但整表归档，不参与注入（清空重来）。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -17,14 +20,16 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS lessons (
+CREATE TABLE IF NOT EXISTS cards (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    rule             TEXT    NOT NULL,
-    wrong            TEXT    NOT NULL DEFAULT '',
-    scene            TEXT    NOT NULL DEFAULT 'all',
+    scene            TEXT    NOT NULL DEFAULT '',
+    bad              TEXT    NOT NULL DEFAULT '',
+    good             TEXT    NOT NULL DEFAULT '',
+    principle        TEXT    NOT NULL DEFAULT '',
     tags             TEXT    NOT NULL DEFAULT '[]',
+    confidence       REAL    NOT NULL DEFAULT 0.6,
+    source           TEXT    NOT NULL DEFAULT 'text',
     weight           REAL    NOT NULL DEFAULT 1.5,
-    source           TEXT    NOT NULL DEFAULT 'chat',
     status           TEXT    NOT NULL DEFAULT 'active',
     created_at       REAL    NOT NULL,
     updated_at       REAL    NOT NULL,
@@ -37,25 +42,42 @@ CREATE TABLE IF NOT EXISTS lessons (
     feedback_up      INTEGER NOT NULL DEFAULT 0,
     feedback_down    INTEGER NOT NULL DEFAULT 0,
     superseded_by    INTEGER NOT NULL DEFAULT 0,
+    card_fp          TEXT    NOT NULL DEFAULT '',
     raw_text         TEXT    NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_lessons_status ON lessons(status);
-CREATE INDEX IF NOT EXISTS idx_lessons_scene ON lessons(scene);
+CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
+CREATE INDEX IF NOT EXISTS idx_cards_fp ON cards(card_fp);
 """
 
 MIN_EF = 1.3
 MAX_INTERVAL_DAYS = 120.0
+_PUNCT = "，。！？、；：“”‘’（）《》…—,.!?;:\"'()[]{}<>~· "
+
+
+def norm_key(text: str) -> str:
+    """归一化取指纹：去空白标点，用于去重与相似判定。"""
+    cleaned = "".join(ch for ch in (text or "") if ch not in _PUNCT).strip()
+    return cleaned
+
+
+def card_fp(scene: str, bad: str, good: str) -> str:
+    """卡片指纹：场景+反例+正例归一化后拼接，同指纹视为同一张卡。"""
+    return "|".join(
+        [norm_key(scene)[:40], norm_key(bad)[:60], norm_key(good)[:60]]
+    )[:200]
 
 
 @dataclass
-class Rule:
+class Card:
     id: int
-    rule: str
-    wrong: str
     scene: str
+    bad: str
+    good: str
+    principle: str
     tags: list[str]
-    weight: float
+    confidence: float
     source: str
+    weight: float
     status: str
     created_at: float
     last_used_at: float
@@ -67,17 +89,10 @@ class Rule:
     feedback_up: int
     feedback_down: int
     superseded_by: int
+    raw_text: str
 
 
-def rule_fp(text: str) -> str:
-    """规则指纹：去空白、去标点后取前 80 字，用于去重与取代判定。"""
-    cleaned = "".join(
-        ch for ch in (text or "") if ch.strip() and ch not in "，。！？、；：“”‘’（）《》…—,.!?;:\"'()[]{}<>"
-    )
-    return cleaned[:80]
-
-
-class LessonStore:
+class CardStore:
     def __init__(self, db_path: str):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
@@ -87,51 +102,84 @@ class LessonStore:
         self._conn.execute("PRAGMA journal_mode=WAL;")
         with self._lock:
             self._conn.executescript(SCHEMA)
-            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(lessons)")}
-            if "rule_fp" not in cols:
-                self._conn.execute("ALTER TABLE lessons ADD COLUMN rule_fp TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_lessons_fp ON lessons(rule_fp)"
+            self._archive_legacy()
+
+    def _archive_legacy(self) -> None:
+        """v1.0.0 的 lessons 表整表归档：那些正则抽出来的句子不可用。"""
+        try:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(lessons)")}
+            if "status" not in cols:
+                return
+            cur = self._conn.execute(
+                "UPDATE lessons SET status='archived', updated_at=? "
+                "WHERE status='active'",
+                (time.time(),),
             )
             self._conn.commit()
+            if cur.rowcount:
+                logging.getLogger(__name__).info(
+                    "[speech_lessons] 旧版 lessons 归档 %d 条（v2 不再使用）",
+                    cur.rowcount,
+                )
+        except sqlite3.Error:
+            return
 
     # ------------------------------------------------------------------ 写入
     def add(
         self,
-        rule: str,
-        wrong: str = "",
-        scene: str = "all",
+        scene: str = "",
+        bad: str = "",
+        good: str = "",
+        principle: str = "",
         tags: Iterable[str] | None = None,
+        confidence: float = 0.6,
+        source: str = "text",
         weight: float = 1.5,
-        source: str = "chat",
         raw_text: str = "",
     ) -> tuple[int, bool]:
-        """新增一条规则。返回 (id, 是否新建)。同指纹的旧规则会被取代。"""
+        """新增一张卡。返回 (id, 是否新建)。同指纹的旧卡只加强权重。"""
+        if not good and not bad:
+            return 0, False
         now = time.time()
-        fp = rule_fp(rule)
+        fp = card_fp(scene, bad, good)
         tag_json = json.dumps(list(tags or []), ensure_ascii=False)
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, weight FROM lessons WHERE rule_fp=? AND status='active' "
-                "AND scene=? ORDER BY id DESC LIMIT 1",
-                (fp, scene),
+                "SELECT id, weight, principle FROM cards WHERE card_fp=? AND status='active' "
+                "ORDER BY id DESC LIMIT 1",
+                (fp,),
             ).fetchone()
             if row:
-                # 同一句话又教了一遍：只加强权重，不重复建条目
                 new_weight = min(3.0, float(row["weight"]) + 0.4)
+                # 同一张卡又教一遍：原则可以更新成更准的说法
+                principle_text = (principle or str(row["principle"] or "")).strip()
                 self._conn.execute(
-                    "UPDATE lessons SET weight=?, updated_at=?, last_used_at=?, "
-                    "feedback_up=feedback_up+1 WHERE id=?",
-                    (new_weight, now, now, row["id"]),
+                    "UPDATE cards SET weight=?, principle=?, confidence=?, updated_at=?,"
+                    " last_used_at=?, feedback_up=feedback_up+1 WHERE id=?",
+                    (new_weight, principle_text, confidence, now, now, row["id"]),
                 )
                 self._conn.commit()
                 return int(row["id"]), False
             cur = self._conn.execute(
-                "INSERT INTO lessons (rule, wrong, scene, tags, weight, source, status,"
-                " created_at, updated_at, last_used_at, rule_fp, raw_text)"
-                " VALUES (?,?,?,?,?,?,'active',?,?,?,?,?)",
-                (rule, wrong, scene, tag_json, weight, source, now, now, now, fp, raw_text),
+                "INSERT INTO cards (scene, bad, good, principle, tags, confidence, source,"
+                " weight, status, created_at, updated_at, last_used_at, card_fp, raw_text)"
+                " VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?)",
+                (
+                    scene,
+                    bad,
+                    good,
+                    principle,
+                    tag_json,
+                    confidence,
+                    source,
+                    weight,
+                    now,
+                    now,
+                    now,
+                    fp,
+                    raw_text,
+                ),
             )
             new_id = int(cur.lastrowid or 0)
             self._conn.commit()
@@ -139,19 +187,21 @@ class LessonStore:
 
     # ------------------------------------------------------------------ 查询
     @staticmethod
-    def _to_rule(row: sqlite3.Row) -> Rule:
+    def _to_card(row: sqlite3.Row) -> Card:
         try:
             tags = json.loads(row["tags"] or "[]")
         except Exception:
             tags = []
-        return Rule(
+        return Card(
             id=int(row["id"]),
-            rule=str(row["rule"] or ""),
-            wrong=str(row["wrong"] or ""),
-            scene=str(row["scene"] or "all"),
+            scene=str(row["scene"] or ""),
+            bad=str(row["bad"] or ""),
+            good=str(row["good"] or ""),
+            principle=str(row["principle"] or ""),
             tags=[str(t) for t in tags if str(t).strip()],
-            weight=float(row["weight"] or 0.0),
+            confidence=float(row["confidence"] or 0.0),
             source=str(row["source"] or ""),
+            weight=float(row["weight"] or 0.0),
             status=str(row["status"] or "active"),
             created_at=float(row["created_at"] or 0),
             last_used_at=float(row["last_used_at"] or 0),
@@ -163,35 +213,29 @@ class LessonStore:
             feedback_up=int(row["feedback_up"] or 0),
             feedback_down=int(row["feedback_down"] or 0),
             superseded_by=int(row["superseded_by"] or 0),
+            raw_text=str(row["raw_text"] or ""),
         )
 
-    def active(self, scene: str | None = None, limit: int = 200) -> list[Rule]:
+    def active(self, limit: int = 200) -> list[Card]:
         with self._lock:
-            if scene:
-                rows = self._conn.execute(
-                    "SELECT * FROM lessons WHERE status='active' AND scene IN ('all', ?) "
-                    "ORDER BY weight DESC, id DESC LIMIT ?",
-                    (scene, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM lessons WHERE status='active' "
-                    "ORDER BY weight DESC, id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-            return [self._to_rule(r) for r in rows]
+            rows = self._conn.execute(
+                "SELECT * FROM cards WHERE status='active' "
+                "ORDER BY weight DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._to_card(r) for r in rows]
 
-    def by_id(self, rule_id: int) -> Rule | None:
+    def by_id(self, card_id: int) -> Card | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM lessons WHERE id=?", (rule_id,)
+                "SELECT * FROM cards WHERE id=?", (card_id,)
             ).fetchone()
-            return self._to_rule(row) if row else None
+            return self._to_card(row) if row else None
 
     def count_active(self) -> int:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM lessons WHERE status='active'"
+                "SELECT COUNT(*) AS c FROM cards WHERE status='active'"
             ).fetchone()
             return int(row["c"] if row else 0)
 
@@ -204,7 +248,7 @@ class LessonStore:
             return
         with self._lock:
             self._conn.executemany(
-                "UPDATE lessons SET use_count=use_count+1, last_used_at=? WHERE id=?",
+                "UPDATE cards SET use_count=use_count+1, last_used_at=? WHERE id=?",
                 [(now, i) for i in ids],
             )
             self._conn.commit()
@@ -216,7 +260,7 @@ class LessonStore:
         with self._lock:
             for i in [int(x) for x in ids if x]:
                 row = self._conn.execute(
-                    "SELECT review_reps, review_ef, review_interval, weight FROM lessons WHERE id=?",
+                    "SELECT review_reps, review_ef, review_interval, weight FROM cards WHERE id=?",
                     (i,),
                 ).fetchone()
                 if not row:
@@ -236,7 +280,7 @@ class LessonStore:
                     interval = min(interval, MAX_INTERVAL_DAYS)
                     weight = min(3.0, weight + 0.25)
                     self._conn.execute(
-                        "UPDATE lessons SET review_reps=?, review_ef=?, review_interval=?,"
+                        "UPDATE cards SET review_reps=?, review_ef=?, review_interval=?,"
                         " next_review_at=?, weight=?, feedback_up=feedback_up+1, updated_at=?"
                         " WHERE id=?",
                         (reps, ef, interval, now + interval * 86400.0, weight, now, i),
@@ -247,7 +291,7 @@ class LessonStore:
                     ef = max(MIN_EF, ef - 0.2)
                     weight = max(0.2, weight - 0.35)
                     self._conn.execute(
-                        "UPDATE lessons SET review_reps=0, review_ef=?, review_interval=0,"
+                        "UPDATE cards SET review_reps=0, review_ef=?, review_interval=0,"
                         " next_review_at=?, weight=?, feedback_down=feedback_down+1,"
                         " updated_at=? WHERE id=?",
                         (ef, now, weight, now, i),
@@ -262,8 +306,8 @@ class LessonStore:
         archived = 0
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, weight, last_used_at, next_review_at, review_reps "
-                "FROM lessons WHERE status='active'"
+                "SELECT id, weight, last_used_at, next_review_at FROM cards "
+                "WHERE status='active'"
             ).fetchall()
             for row in rows:
                 last = float(row["last_used_at"] or row["next_review_at"] or 0)
@@ -275,30 +319,33 @@ class LessonStore:
                 weight = float(row["weight"] or 0.0) - per_day * idle_days
                 if weight <= archive_weight:
                     self._conn.execute(
-                        "UPDATE lessons SET status='archived', weight=?, updated_at=? WHERE id=?",
+                        "UPDATE cards SET status='archived', weight=?, updated_at=? WHERE id=?",
                         (max(0.0, weight), now, row["id"]),
                     )
                     archived += 1
                 else:
                     self._conn.execute(
-                        "UPDATE lessons SET weight=?, updated_at=? WHERE id=?",
+                        "UPDATE cards SET weight=?, updated_at=? WHERE id=?",
                         (weight, now, row["id"]),
                     )
             self._conn.commit()
         return archived
 
-    def archive(self, rule_id: int) -> bool:
+    def archive(self, card_id: int) -> bool:
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE lessons SET status='archived', updated_at=? WHERE id=?",
-                (time.time(), rule_id),
+                "UPDATE cards SET status='archived', updated_at=? WHERE id=?",
+                (time.time(), card_id),
             )
             self._conn.commit()
             return bool(cur.rowcount)
 
     def clear(self) -> int:
         with self._lock:
-            cur = self._conn.execute("UPDATE lessons SET status='archived', updated_at=?", (time.time(),))
+            cur = self._conn.execute(
+                "UPDATE cards SET status='archived', updated_at=? WHERE status='active'",
+                (time.time(),),
+            )
             self._conn.commit()
             return int(cur.rowcount or 0)
 
