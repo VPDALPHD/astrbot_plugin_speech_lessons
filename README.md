@@ -2,6 +2,34 @@
 
 ![封面](logo.png)
 
+## 兼容性测试
+
+已实测可与下列插件**同时启用**。表内名称是 **AstrBot 面板里显示的名字**（不是仓库名），
+版本为测试时实际运行的版本；测试环境 AstrBot 4.22 + aiocqhttp（NapCat），共 16 个插件同时启用。
+
+| 面板显示名 | 版本 | 关系 | 结论 |
+|---|---|---|---|
+| 我会永远陪着你 | 6.5.6 | 它 `priority=0/220000` 处理私聊并 `stop_event()` 接管整轮；消息分发遇 stopped 会 break | ✅ 已适配：本插件捕获钩子挂 **250000**，排在它之前 |
+| 我会牢牢记住你 | 1.10.5 | `on_llm_request(-20)` 注入记忆；工具 `memory_companion_remember` | ✅ 兼容：双方都是 append system_prompt，互不覆盖；工具描述已划清"记事实 vs 学口气" |
+| 思维链式消息防抖 | 1.4.2 | 在 `on_waiting_llm_request` 才合并消息，晚于消息处理器 | ✅ 已适配：本插件自带 9 秒防抖缓冲（`capture_debounce_seconds`） |
+| 表情包管理器 | 5.3.3 | `on_llm_request(99999)` 剥自己的提示块 | ✅ 兼容：时序在本插件之前 |
+| 表情包收藏库 | 1.7.0 | 4 个工具 + `on_llm_response` / `after_message_sent` | ✅ 兼容：不碰 system_prompt |
+| 大肥鱼 · 活人感 | v0.4.0 | 消息处理器 `sys.maxsize-1`、回复钩子同优先级 | ✅ 兼容：不 stop 私聊 |
+| 大肥鱼心情 | v0.3.0 | `on_llm_request` 追加心情 | ✅ 兼容：append 式 |
+| 我会自己刷B站 | 1.9.7 | 私聊 850 消息处理器 | ✅ 兼容 |
+| 万能解析器 | v1.6.1 | `parse_media_url` 工具 | ✅ 兼容：工具名不撞 |
+| 群典 | 2.0.0 | 只发梗图 | ✅ 兼容 |
+| 我会替你留住故事 | 0.2.2 | `content_companion_view_work` 工具 | ✅ 兼容 |
+| 主动消息 (Proactive Chat) | v1.3.0-beta.1 | 私聊 999 / `after_message_sent` | ✅ 兼容 |
+| QQ 消息内容归一化 | 1.0.1 | 消息标准化 | ✅ 兼容 |
+| QQ 能力增强 | 1.15.2 | 29 个 `qq_*` 工具 + `on_llm_request(-20000)` | ✅ 兼容：不写 system_prompt（工具数量多，注意模型选择成本） |
+| astrbot_plugin_blacklist_tools | v1.6 | 消息处理器 `sys.maxsize-1`（该插件无中文名，面板按包名显示） | ✅ 兼容：只拦被拉黑用户 |
+
+**审计方法**：读 AstrBot 的 handler 注册/分发源码（`star_handler.py` 按 priority 降序、
+`star_request.py` 遇 `stop_event()` 即 break），再逐插件扫 `llm_tool` 名、钩子优先级、
+`req.system_prompt` 写法与 `stop_event` 调用点。完整报告见仓库外文档《教我说话v2-冲突审计》。
+
+
 ## 它解决什么问题
 
 群里它冒出一句人机味很重的话，你私聊它说"这样不对，AI 味太重"，或者
