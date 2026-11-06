@@ -47,6 +47,7 @@ class SpeechLessonsPlugin(Star):
         self._pending_notes: dict[str, str] = {}
         self._last_reply: dict[str, tuple[str, float]] = {}
         self._claimed: dict[str, float] = {}
+        self._buffers: dict[str, dict[str, Any]] = {}
         self._learn_tasks: set[asyncio.Task] = set()
         self._maint_task: asyncio.Task | None = None
         self._last_decay_at = 0.0
@@ -71,7 +72,13 @@ class SpeechLessonsPlugin(Star):
             self._maint_task = asyncio.create_task(self._maintenance_loop())
 
     async def terminate(self):
-        for task in (self._maint_task, *self._learn_tasks):
+        tasks = [self._maint_task, *self._learn_tasks]
+        for buf in list(self._buffers.values()):
+            task = buf.get("task")
+            if task:
+                tasks.append(task)
+        self._buffers.clear()
+        for task in tasks:
             if task and not task.done():
                 task.cancel()
         self.store.close()
@@ -283,11 +290,53 @@ class SpeechLessonsPlugin(Star):
     # ================================================================== 钩子
     @filter.on_llm_response()
     async def remember_reply(self, event: AstrMessageEvent, resp: Any):
-        """记住本轮自己的回复原文，供主人下一句"这样不对"时当反例。"""
+        """兜底记录本轮回复（可能带标记/标签，后面会被 on_decorating_result 覆盖）。"""
         umo = self._session_key(event)
         if not umo:
             return
-        text = str(getattr(resp, "completion_text", "") or "").strip()
+        text = self._clean_reply(str(getattr(resp, "completion_text", "") or ""))
+        if text:
+            self._remember_text(umo, text)
+
+    @filter.on_decorating_result(priority=-200000)
+    async def remember_final_reply(self, event: AstrMessageEvent):
+        """抓用户真正看到的那句话：结果链里的纯文本，最贴合"反例"用途。
+
+        排在 private_companion 的 on_decorating_result(20000~-18000) 之后，
+        所以拿到的是它改完（去分段标记/审校）之后的文本。
+        """
+        try:
+            result = event.get_result()
+        except Exception:
+            return
+        chain = getattr(result, "chain", None) or []
+        parts: list[str] = []
+        for comp in chain:
+            name = type(comp).__name__
+            if name == "Plain":
+                text = str(getattr(comp, "text", "") or "").strip()
+                if text:
+                    parts.append(text)
+        if not parts:
+            return
+        umo = self._session_key(event)
+        if not umo:
+            return
+        merged = self._clean_reply(" ".join(parts))
+        if merged:
+            self._remember_text(umo, merged)
+
+    @staticmethod
+    def _clean_reply(text: str) -> str:
+        """去掉分段标记、TTS 标签、HTML 注释等非人话噪声。"""
+        if not text:
+            return ""
+        out = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        out = re.sub(r"\[(?:TTS|tts|语音|表情|图片)[^\]]{0,60}\]", "", out)
+        out = re.sub(r"[ \t]+", " ", out)
+        return out.strip()[:400]
+
+    def _remember_text(self, umo: str, text: str) -> None:
         if not text:
             return
         if len(self._last_reply) > REPLY_CACHE_MAX:
@@ -295,9 +344,17 @@ class SpeechLessonsPlugin(Star):
             self._last_reply.pop(oldest, None)
         self._last_reply[umo] = (text[:600], time.time())
 
-    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    # --------------------------------------------------- 捕获（带分片防抖）
+    @filter.event_message_type(
+        filter.EventMessageType.PRIVATE_MESSAGE, priority=250000
+    )
     async def capture_lesson(self, event: AstrMessageEvent):
-        """私聊里识别「在教」的消息。只有主人说话才算。"""
+        """私聊里识别「在教」的消息。只有主人说话才算。
+
+        优先级 250000：必须排在 private_companion(220000/0) 之前——
+        它回复完会 stop_event()，而消息分发循环遇到 stopped 就 break，
+        排在它后面等于这条钩子永远不执行。
+        """
         if not self._enabled() or not bool(self._cfg("capture_enabled", True)):
             return
         if not self._is_owner(event):
@@ -308,11 +365,6 @@ class SpeechLessonsPlugin(Star):
         has_image = self._has_image(event)
         if not note and not has_image:
             return
-        try:
-            if event.is_stopped():
-                return
-        except Exception:
-            pass
 
         umo = self._session_key(event)
         feedback = judge_mod.detect_feedback(note)
@@ -342,32 +394,54 @@ class SpeechLessonsPlugin(Star):
         if feedback is None and level == "chat":
             return
 
-        key = self._claim(umo, note)
+        # 4) 进缓冲区：图 + 文字常常分两条发，reply_merge 也在这个 stage 之后才合并，
+        #    所以自己攒一个小窗口再一次性提炼，避免学成"半条"。
+        images = await self._image_paths(event)
+        await self._buffer_capture(umo, note, images, bool(has_image))
+
+    async def _buffer_capture(
+        self, umo: str, note: str, images: list[str], has_image: bool
+    ) -> None:
+        buf = self._buffers.get(umo)
+        if buf is None:
+            buf = {"parts": [], "images": [], "has_image": False, "task": None}
+            self._buffers[umo] = buf
+        if note:
+            buf["parts"].append(note)
+        for path in images:
+            if path and path not in buf["images"]:
+                buf["images"].append(path)
+        buf["has_image"] = buf["has_image"] or has_image
+        buf["ts"] = time.time()
+
+        old = buf.get("task")
+        if old and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self._flush_buffer(umo))
+        buf["task"] = task
+
+    async def _flush_buffer(self, umo: str) -> None:
+        await asyncio.sleep(float(self._cfg("capture_debounce_seconds", 9.0)))
+        buf = self._buffers.pop(umo, None)
+        if not buf:
+            return
+        parts = [p for p in buf["parts"] if p]
+        images = list(buf["images"])
+        if not parts and not images:
+            return
+        note = "\n".join(parts)[:800]
+
+        key = self._claim(umo, note or f"img:{len(images)}")
         if not key:
             return
-        if len(self._learn_tasks) > MAX_TASK_KEEP:
-            self._release(key)
-            logger.debug("[speech_lessons] 学习任务过多，跳过本轮")
-            return
-        task = asyncio.create_task(
-            self._learn_bg_with_images(event, umo, note, key, "chat")
-        )
-        self._learn_tasks.add(task)
-        task.add_done_callback(self._learn_tasks.discard)
-
-    async def _learn_bg_with_images(
-        self, event: AstrMessageEvent, umo: str, note: str, key: str, source: str
-    ):
-        images = await self._image_paths(event)
-        last_reply = self._last_reply_text(umo)
         learned = False
         try:
             result = await self._learn(
                 umo=umo,
                 note=note,
                 images=images,
-                last_reply=last_reply,
-                source="image" if images else source,
+                last_reply=self._last_reply_text(umo),
+                source="image" if images else "chat",
             )
             if result:
                 learned = True
@@ -377,9 +451,18 @@ class SpeechLessonsPlugin(Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[speech_lessons] 后台学习失败: %s", exc)
         finally:
-            # 学成功了就一直占着 claim（同一句话 4 分钟内不重复学），失败才放开重试
+            # 学成功了就一直占着 claim（4 分钟内同一句不重复学），失败才放开重试
             if not learned:
                 self._release(key)
+
+    def _drop_buffer(self, umo: str) -> None:
+        """工具/指令已经学过时，丢掉同会话里还没到期的缓冲，避免重复调模型。"""
+        buf = self._buffers.pop(umo, None)
+        if not buf:
+            return
+        task = buf.get("task")
+        if task and not task.done():
+            task.cancel()
 
     # ================================================================== 注入
     def _pick_cards(self, current_text: str):
@@ -472,29 +555,32 @@ class SpeechLessonsPlugin(Star):
     @filter.llm_tool(name="learn_speech_style")
     async def learn_speech_style_tool(
         self, event: AstrMessageEvent, note: str = "", focus: str = ""
-    ) -> str:
+    ) -> str | None:
         """把主人这次"教你说话"的内容学下来（存成说话卡：场景/反例/正例/要点）。
 
         什么时候调用：主人正在纠正你的表达方式，或给你优秀回复范例要你学。
         例如"这样不对，AI 味太重""太机械了，别说教""学学你同类，这样回"
         "以后别这样接话"，或者主人发来聊天截图/范例并让你照做。
         什么时候不要调用：普通聊天、提问、夸你、主人只是吐槽别人或转述别人说话。
+        只用于"表达方式/口气"；主人要记的是事实、事件、约定时，用
+        memory_companion_remember 之类的记忆工具，不要调本工具。
         同一句话只需要调一次；学过之后不要向主人复述规则内容。
 
         Args:
             note(string): 主人这次教你的原话，尽量原样照抄。
             focus(string): 你想额外强调的重点（如"别反问"），没有就留空。
         """
+        # 未授权/非私聊/关闭时返回 None：不往 prompt 里塞拒绝文案，避免污染对话
         if not self._enabled() or not bool(self._cfg("learn_enabled", True)):
-            return "学习功能当前关闭，这次没有记录。"
+            return None
         if not self._is_owner(event):
-            return "只有主人能教我说话，这次没有记录。"
+            return None
         try:
             is_private = bool(event.is_private_chat())
         except Exception:
             is_private = True
         if not is_private:
-            return "我只在私聊里跟主人学说话，群里这次没有记录。"
+            return None
 
         raw = str(getattr(event, "message_str", "") or "").strip()
         text = (note or raw).strip()
@@ -522,6 +608,7 @@ class SpeechLessonsPlugin(Star):
                 self._release(key)
         if not result:
             return "这次没能提炼出可用的说法（可能内容太模糊或模型超时），没有写进规矩。"
+        self._drop_buffer(umo)
         scenes = [c.get("scene") for c in result["cards"] if c.get("scene")]
         tail = f"（场景：{scenes[0]}）" if scenes else ""
         return (
@@ -530,13 +617,13 @@ class SpeechLessonsPlugin(Star):
         )
 
     @filter.llm_tool(name="list_speech_styles")
-    async def list_speech_styles_tool(self, event: AstrMessageEvent) -> str:
+    async def list_speech_styles_tool(self, event: AstrMessageEvent) -> str | None:
         """查看主人教过你的说话卡清单（id + 摘要）。
 
         什么时候调用：主人问"我教过你什么说法/你都学了什么"时。不需要任何参数。
         """
         if not self._is_owner(event):
-            return "这个只有主人能看。"
+            return None
         cards = self.store.active(limit=30)
         if not cards:
             return "还没有任何说话卡。"
@@ -546,7 +633,9 @@ class SpeechLessonsPlugin(Star):
         return "\n".join(lines)
 
     @filter.llm_tool(name="forget_speech_style")
-    async def forget_speech_style_tool(self, event: AstrMessageEvent, card_id: str = "") -> str:
+    async def forget_speech_style_tool(
+        self, event: AstrMessageEvent, card_id: str = ""
+    ) -> str | None:
         """删掉一张主人教过的说话卡。
 
         什么时候调用：主人明确说"忘掉第 3 条/那条说错了"时。不确定 id 先调 list_speech_styles。
@@ -555,7 +644,7 @@ class SpeechLessonsPlugin(Star):
             card_id(string): 要删的说话卡 id 数字。
         """
         if not self._is_owner(event):
-            return "这个只有主人能用。"
+            return None
         try:
             target = int(str(card_id).strip())
         except (TypeError, ValueError):
@@ -626,6 +715,7 @@ class SpeechLessonsPlugin(Star):
             if not result:
                 yield event.plain_result("没提炼出可用的说法（太模糊或模型超时）。")
                 return
+            self._drop_buffer(umo)
             lines = [f"学会 {result['count']} 张："]
             for card in result["cards"]:
                 mark = "新" if card.get("created") else "加强"

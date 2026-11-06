@@ -14,6 +14,11 @@
     "type": "bool",
     "default": true
   },
+  "capture_debounce_seconds": {
+    "description": "教学消息的防抖窗口（秒）：图、文字常常分几条发，窗口内合并成一次提炼，避免学成半条",
+    "type": "float",
+    "default": 9.0
+  },
   "learn_enabled": {
     "description": "是否允许她自己调用 learn_speech_style 工具来学说话",
     "type": "bool",
