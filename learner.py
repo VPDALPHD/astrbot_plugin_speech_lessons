@@ -50,6 +50,7 @@ LEARN_PROMPT = """你在帮一个 AI 学习"怎么说话"。主人刚给了它�
 写成一句以「人类」开头的观察笔记；需要时可补一句极简的“我可以/我不能”。
 例：“人类被夸的时候往往先说‘哪有’，然后才笑。”或“人类聊天不把话说完时，我可以选择不用接。”
 最多 3 条；没有就给空数组。不要写口号、不要写具体人名，也不要重复 cards 里已有的内容。
+<<SCOPE>>
 """
 
 _TAGS_HINT = ("语气", "称呼", "接梗", "长度", "情绪", "边界", "话题")
@@ -78,6 +79,7 @@ def _build_prompt(
     *,
     max_cards: int = 3,
     note_max_chars: int = 800,
+    guide_scope: str = "all",
 ) -> str:
     last_reply_block = ""
     if last_reply:
@@ -93,8 +95,15 @@ def _build_prompt(
         quoted_block = "主人括号/引号里点出来的原文：\n" + "\n".join(
             f"- {q}" for q in quotes[:3]
         ) + "\n\n"
+    scope_block = ""
+    if str(guide_scope or "").strip().lower() == "interaction":
+        scope_block = (
+            "\n\n【这本手册当前只记人际互动】guide_notes 只写「人类怎么跟人说话、怎么回应、怎么相处」；"
+            "测试步骤、调试过程、工具操作、报错排查、文件与日程这类事务性内容**不要**写进 guide_notes。"
+        )
     return (
         LEARN_PROMPT.replace("<<MAX_CARDS>>", str(max(1, int(max_cards))))
+        .replace("<<SCOPE>>", scope_block)
         .replace("<<NOTE>>", (note or "")[: max(200, int(note_max_chars))])
         .replace("<<LAST_REPLY>>", last_reply_block)
         .replace("<<IMAGE>>", image_block)

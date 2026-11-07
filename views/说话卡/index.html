@@ -6,7 +6,7 @@
     <meta http-equiv="pragma" content="no-cache" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>说话卡面板</title>
-    <link rel="stylesheet" href="./style.css?v=4.2.0" />
+    <link rel="stylesheet" href="./style.css?v=4.6.1" />
   </head>
   <body>
     <header class="top">
@@ -34,30 +34,33 @@
         <div class="book" id="book" role="button" tabindex="0" aria-label="点击翻开指南书">
           <div class="book-spread">
             <div class="book-page left">
-              <div class="book-page-head">
-                <span class="book-page-no" id="book-page-no-left">—</span>
-                <span class="book-page-day" id="book-page-day-left"></span>
-              </div>
-              <div class="book-items" id="book-items-left"><div class="book-empty"></div></div>
-              <div class="book-page-foot" id="book-page-foot-left"></div>
-            </div>
+                                      <div class="book-page-head">
+                                        <span class="book-page-no" id="book-page-no-left">—</span>
+                                        <span class="book-page-day" id="book-page-day-left"></span>
+                                      </div>
+                                      <div class="book-items" id="book-items-left"><div class="book-empty"></div></div>
+                                      <div class="book-page-foot" id="book-page-foot-left"></div>
+                                    </div>
             <div class="book-page right">
-              <div class="book-page-head">
-                <span class="book-page-no" id="book-page-no-right">—</span>
-                <span class="book-page-day" id="book-page-day-right"></span>
-              </div>
-              <div class="book-items" id="book-items-right"><div class="book-empty"></div></div>
-              <div class="book-page-foot" id="book-page-foot-right"></div>
-            </div>
+                                      <div class="book-page-head">
+                                        <span class="book-page-no" id="book-page-no-right">—</span>
+                                        <span class="book-page-day" id="book-page-day-right"></span>
+                                      </div>
+                                      <div class="book-items" id="book-items-right"><div class="book-empty"></div></div>
+                                      <div class="book-page-foot" id="book-page-foot-right"></div>
+                                    </div>
           </div>
           <div class="book-cover" id="book-cover">
-            <div class="book-cover-inner">
-              <div class="book-kicker">人类伪装指南</div>
-              <div class="book-title">我 的 手 记</div>
-              <div class="book-cover-sub" id="book-cover-sub">共 0 页</div>
-              <div class="book-hint">点一下，翻开</div>
+            <div class="cover-face front">
+              <div class="book-cover-inner">
+                <div class="book-kicker">人类伪装指南</div>
+                <div class="book-title">我 的 手 记</div>
+                <div class="book-cover-sub" id="book-cover-sub">共 0 页</div>
+                <div class="book-hint">点一下，翻开</div>
+              </div>
+              <div class="book-ribbon" aria-hidden="true"></div>
             </div>
-            <div class="book-ribbon" aria-hidden="true"></div>
+            <div class="cover-face back" id="cover-back"></div>
           </div>
         </div>
       </div>
@@ -80,6 +83,8 @@
       <p class="guide-meta" id="guide-meta">每轮只读最近几页，不是整本。</p>
       <div id="book-search-hit" class="book-search-hit hidden"></div>
     </section>
+
+    <div class="divider-grad" aria-hidden="true"></div>
 
     <main id="list" class="list">
       <div class="empty">加载中…</div>
@@ -189,6 +194,6 @@
       </div>
     </div>
 
-    <script type="module" src="./app.v4900.js"></script>
+    <script type="module" src="./app.v5200.js"></script>
   </body>
 </html>

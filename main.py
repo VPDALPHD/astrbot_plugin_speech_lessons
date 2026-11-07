@@ -85,9 +85,13 @@ CONFIG_FIELDS = [
     {"key": "guide_similar_threshold", "label": "写前查重的相似度阈值", "type": "float", "default": 0.80,
      "group": "人类伪装指南", "min": 0.5, "max": 0.99,
      "hint": "她写新观察前先查旧账；向量相似度高于它，就把旧页的条目摊给她看，让她决定改写还是划掉重写。"},
+    {"key": "guide_record_scope", "label": "记录程度", "type": "text", "default": "all",
+     "group": "人类伪装指南",
+     "options": [{"value": "all", "label": "所有"}, {"value": "interaction", "label": "仅互动"}],
+     "hint": "所有=日常琐碎也记；仅互动=只记人类的【人际互动】和【人际交流】，不记流水账。"},
     {"key": "guide_autowrite_enabled", "label": "允许她自己写这本指南书", "type": "bool",
      "default": True, "group": "人类伪装指南",
-     "hint": "开启后，她可以在聊天/看视频后自己往这本子里写条目（工具 edit_human_guide：list/read/search/append/write/update/remove/replace）。"},
+     "hint": "开启后，她能在聊天/看视频后自己往本子里写条目。"},
     {"key": "guide_autowrite_owner_only", "label": "只允许主人在场时写入", "type": "bool",
      "default": True, "group": "人类伪装指南",
      "hint": "关掉则任何人都能触发写入（不推荐，群友可能引导她写入奇怪准则）。"},
@@ -571,6 +575,7 @@ class SpeechLessonsPlugin(Star):
             # 否则内容会被截断，多个要点只能提炼出一张卡。
             max_cards=int(self._cfg("max_cards_per_learn", 5)),
             note_max_chars=int(self._cfg("learn_note_max_chars", 3000)),
+            guide_scope=str(self._cfg("guide_record_scope", "all") or "all"),
         )
         if not result:
             return None
@@ -2003,6 +2008,16 @@ class SpeechLessonsPlugin(Star):
             return {"ok": False, "message": f"{day} 没有能翻到的对话，写不出来"}
 
         cap = max(400, self._journal_budget())
+        scope = str(self._cfg("guide_record_scope", "all") or "all").strip().lower()
+        if scope == "interaction":
+            task_line = (
+                "以观察者的角度，只写你观察到的、与你预判不同的人类的【人际互动】和"
+                "【人际交流】行为，只记录人类的互动和交流，不记录日常琐碎，写成观察笔记：\n"
+                "（只记他/她怎么跟人说话、怎么回应、怎么相处；测试步骤、调试过程、工具操作、"
+                "文件与日程这类事务性内容不算互动，不要记。）"
+            )
+        else:
+            task_line = "以观察者的角度，只写你观察到的、与你预判不同的「人类」行为，写成观察笔记："
         learned = self._today_learned_lines(day)
         learned_block = ("\n".join(f"- {line}" for line in learned)) if learned else "（今天没学到新的）"
 
@@ -2018,7 +2033,7 @@ class SpeechLessonsPlugin(Star):
 【今天学到的说话方式】
 {learned_block}
 
-以观察者的角度，只写你观察到的、与你预判不同的「人类」行为，写成观察笔记：
+{task_line}
 
 1. 每条以「人类」开头，客观陈述人类在某场景下的反应、怎么回复，什么场合会怎样；语气平实，不做抒情。
    例：
@@ -2046,6 +2061,19 @@ class SpeechLessonsPlugin(Star):
 
 【今天学到的说话方式】
 {learned_block}
+
+{task_line}
+
+1. 每条以「人类」开头，客观陈述人类在某场景下的反应、怎么回复，什么场合会怎样；语气平实，不做抒情。
+   例：
+   1. 人类聊天不把话说完时，我可以选择不用接。
+   2. 人类被夸的时候往往第一时间反应"哪有"。然后会笑，往往不是谦虚。
+   3. 人类聊天时从来不会把话总结，我不能这么做。
+2. 需要的时候，可以在陈述后面补一句极短的自我约束（"我可以…""我不能…"），
+   但不要每条都补，更不要写成决心书；观察句本身要独立成立。
+3. 只写从今天对话里真实观察到的，不编造；不写具体人名、别人的隐私、日程、承诺。
+4. 同一件事不要拆成好几条，合并成一条 add。
+5. 补完之后整页不超过 {cap} 字。
 
 只输出 JSON，不要 markdown：
 {{"add": ["人类……"], "strike": ["旧条目里能唯一定位的一段原文"], "update": [{{"target": "旧条目片段", "content": "改后的文字"}}], "reason": "一句话"}}

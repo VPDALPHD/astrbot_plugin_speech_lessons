@@ -213,7 +213,7 @@
     "description": "允许她自己写这本指南书",
     "type": "bool",
     "default": true,
-    "hint": "开启后，她可以在聊天/看视频后自己往这本子里写条目（工具 edit_human_guide：list/read/search/append/write/update/remove/replace）。"
+    "hint": "开启后，她能在聊天/看视频后自己往本子里写条目。"
   },
   "guide_autowrite_owner_only": {
     "description": "只允许主人在场时写入",
@@ -250,5 +250,15 @@
     "type": "int",
     "default": 1,
     "hint": "以「天」为单位：默认最近 2 天 + 按关键词再翻 1 天；0 = 不回忆。"
+  },
+  "guide_record_scope": {
+    "description": "记录程度",
+    "type": "string",
+    "default": "all",
+    "options": [
+      "all",
+      "interaction"
+    ],
+    "hint": "all=所有（日常琐碎也记）；interaction=仅互动（只记人际互动与人际交流）"
   }
 }

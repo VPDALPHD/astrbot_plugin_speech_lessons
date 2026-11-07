@@ -814,17 +814,40 @@ function renderEmptySheet() {
   $("book-indicator").textContent = "—";
 }
 
-function flipSpread() {
+// 真实翻纸：右页那张纸绕书脊翻到左边（背面就是新的左页），反向同理
+function playFlip({ forward, front, back, onMid }) {
   const spreadEl = document.querySelector(".book-spread");
   if (!spreadEl) return;
-  spreadEl.classList.remove("flip");
-  void spreadEl.offsetWidth;
-  spreadEl.classList.add("flip");
+  const sheet = document.createElement("div");
+  sheet.className = "flip-sheet " + (forward ? "fwd" : "back");
+
+  const makeFace = (html, side, extra) => {
+    const face = document.createElement("div");
+    face.className = "flip-face" + (extra ? " " + extra : "");
+    const page = document.createElement("div");
+    page.className = "book-page " + side;
+    page.innerHTML = html;
+    face.appendChild(page);
+    return face;
+  };
+
+  sheet.appendChild(makeFace(front, forward ? "right" : "left", ""));
+  sheet.appendChild(makeFace(back, forward ? "left" : "right", "back"));
+  spreadEl.appendChild(sheet);
+  void sheet.offsetWidth;
+  sheet.classList.add("run");
+
   clearTimeout(bookState.flipTimer);
-  bookState.flipTimer = setTimeout(() => spreadEl.classList.remove("flip"), 520);
+  const midTimer = setTimeout(() => {
+    if (typeof onMid === "function") onMid();
+  }, 300);
+  bookState.flipTimer = setTimeout(() => {
+    clearTimeout(midTimer);
+    sheet.remove();
+  }, 720);
 }
 
-async function showSheet(index, animate = false) {
+async function showSheet(index, animate = false, direction = 1) {
   if (!bookState.sheets.length) {
     renderEmptySheet();
     return;
@@ -832,37 +855,92 @@ async function showSheet(index, animate = false) {
   const total = bookState.sheets.length;
   const i = Math.max(0, Math.min(index, total - 1));
   const sheet = bookState.sheets[i];
-  if (animate) flipSpread();
-  bookState.sheet = i;
-  bookState.pageId = sheet.pageId;
-  fillPage("left", sheet.left, sheet, i * 2 + 1, sheet.startNo);
-  fillPage(
-    "right",
-    sheet.right,
-    sheet,
-    i * 2 + 2,
-    (sheet.startNo || 0) + countItems(sheet.left),
-  );
-  $("book-indicator").textContent = `${sheet.day}（${sheet.cont * 2 + 1}–${sheet.cont * 2 + 2}）`;
+
+  const leftEl = document.querySelector(".book-page.left");
+  const rightEl = document.querySelector(".book-page.right");
+  const snapshot =
+    animate && leftEl && rightEl
+      ? { left: leftEl.innerHTML, right: rightEl.innerHTML }
+      : null;
+
+  const apply = () => {
+    bookState.sheet = i;
+    bookState.pageId = sheet.pageId;
+    fillPage("left", sheet.left, sheet, i * 2 + 1, sheet.startNo);
+    fillPage(
+      "right",
+      sheet.right,
+      sheet,
+      i * 2 + 2,
+      (sheet.startNo || 0) + countItems(sheet.left),
+    );
+    $("book-indicator").textContent = `${sheet.day}（${sheet.cont * 2 + 1}–${sheet.cont * 2 + 2}）`;
+  };
+
+  if (!snapshot) {
+    apply();
+    return;
+  }
+
+  apply();
+  const freshLeft = leftEl.innerHTML;
+  const freshRight = rightEl.innerHTML;
+
+  if (direction > 0) {
+    // 下一张：旧右页翻到左边，背面 = 新左页；旧左页先留着，纸掠过 90° 时再换
+    leftEl.innerHTML = snapshot.left;
+    playFlip({
+      forward: true,
+      front: snapshot.right,
+      back: freshLeft,
+      onMid: () => {
+        leftEl.innerHTML = freshLeft;
+      },
+    });
+  } else {
+    // 上一张：旧左页翻到右边，背面 = 新右页
+    rightEl.innerHTML = snapshot.right;
+    playFlip({
+      forward: false,
+      front: snapshot.left,
+      back: freshRight,
+      onMid: () => {
+        rightEl.innerHTML = freshRight;
+      },
+    });
+  }
+}
+
+// 把当前左页克隆到封面背面：封面翻到左边时看到的就是真正的那一页
+function syncCoverBack() {
+  const src = document.querySelector(".book-spread > .book-page.left");
+  const back = $("cover-back");
+  if (!back) return;
+  const page = document.createElement("div");
+  page.className = "book-page left";
+  page.innerHTML = src ? src.innerHTML : "";
+  back.replaceChildren(page);
 }
 
 function openBook() {
   if (bookState.open) return;
   bookState.open = true;
-  $("book").classList.add("open");
   if (!bookState.sheets.length) renderEmptySheet();
   else showSheet(bookState.sheet);
+  syncCoverBack();
+  $("book").classList.add("open");
 }
 
 function closeBook() {
   if (!bookState.open) return;
   bookState.open = false;
+  syncCoverBack();
   $("book").classList.add("closing");
   $("book").classList.remove("open");
   clearTimeout(bookState.closeTimer);
   bookState.closeTimer = setTimeout(() => {
     $("book").classList.remove("closing");
-  }, 430);
+  }, 800);
 }
 
 async function stepSheet(dir) {
@@ -876,7 +954,7 @@ async function stepSheet(dir) {
     toast(dir > 0 ? "已经是最后一张纸了" : "已经是第一张纸了");
     return;
   }
-  await showSheet(next, true);
+  await showSheet(next, true, dir);
 }
 
 function currentPage() {

@@ -48,7 +48,7 @@ desc: |
 
   数据位置：`data/plugin_data/astrbot_plugin_speech_lessons/lessons.db`
   指令：`/教 列表`、`/教 学 <原话>`、`/教 删 3`、`/教 清`、`/教 关`、`/教 开`、`/教 测试 <话>`
-version: 2.5.0
+version: 2.5.1
 author: "VPDALPHD，DS_CHAN"
 repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
 social_link: "https://github.com/VPDALPHD"
