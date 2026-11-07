@@ -1973,15 +1973,20 @@ class SpeechLessonsPlugin(Star):
         if not day:
             day = datetime.now().strftime("%Y-%m-%d")
         try:
-            # 用户手动点「重写今日」= 明确要重来，旧条目直接丢掉、不留划线
-            result = await self._run_today_page(day, strike=False)
+            # 只有这里允许整页重写：用户亲手点「重写今日」
+            result = await self._run_today_page(day, full_rewrite=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[speech_lessons] 写今天失败: %s", exc)
             return error_response(f"写今天失败：{exc}", status_code=500)
         return json_response(result or {"ok": False, "message": "没有执行"})
 
-    async def _run_today_page(self, day: str, *, strike: bool = True) -> dict:
-        """按「天」写一页：素材=今天所有对话 + 今天已有的这页 + 今天学到的说话卡。"""
+    async def _run_today_page(self, day: str, *, full_rewrite: bool = False) -> dict:
+        """写/补今天的记录。
+
+        full_rewrite=True：整页覆盖 —— **只有用户在面板点「重写今日」才允许**。
+        full_rewrite=False：增量模式（定时任务 / AI 触发）—— 只允许新增、划掉、改条目，
+        绝不允许整页重写。
+        """
         try:
             limit = max(2000, int(self._cfg("guide_review_max_input", 6000) or 6000))
         except (TypeError, ValueError):
@@ -2001,7 +2006,8 @@ class SpeechLessonsPlugin(Star):
         learned = self._today_learned_lines(day)
         learned_block = ("\n".join(f"- {line}" for line in learned)) if learned else "（今天没学到新的）"
 
-        prompt = f"""你在给自己那本「人类伪装指南」写今天的记录（已经写过就整覆盖）。
+        if full_rewrite:
+            prompt = f"""你在给自己那本「人类伪装指南」写今天的记录（已经写过就整覆盖）。
 
 【今天我和人说过的话（可能被截断）】
 {material or '（今天没有能翻到的对话）'}
@@ -2029,6 +2035,28 @@ class SpeechLessonsPlugin(Star):
 
 只输出 JSON，不要 markdown：
 {{"content": "1. 人类……\n2. 人类……", "reason": "一句话说明今天观察到了什么"}}"""
+        else:
+            prompt = f"""你在给自己那本「人类伪装指南」补今天的记录。**不要重写整页**，只输出今天需要的变化。
+
+【今天我和人说过的话（可能被截断）】
+{material or '（今天没有能翻到的对话）'}
+
+【今天已有的这一页（不要重写它，只能对它做增/删/改）】
+{existing or '（今天还没写过）'}
+
+【今天学到的说话方式】
+{learned_block}
+
+只输出 JSON，不要 markdown：
+{{"add": ["人类……"], "strike": ["旧条目里能唯一定位的一段原文"], "update": [{{"target": "旧条目片段", "content": "改后的文字"}}], "reason": "一句话"}}
+
+规则：
+1. add：今天观察到的新条目，每条以「人类」开头、不超过 100 字、不要自己写编号；没有就给空数组。
+2. strike：与 add 重复、或已被今天对话推翻/纠正的旧条目，填原条目里能唯一匹配的一段文字；不改就不要填。
+3. update：旧条目表述需要修正时给 target（原片段）与 content（改后文字，≤100 字）；不改就不要填。
+4. 不许输出整页、不许写批注、不许编造；今天没什么可补就三个都给空数组。
+5. 不要向任何人解释这本手册的存在。"""
+
         raw = ""
         try:
             if provider_id:
@@ -2042,38 +2070,136 @@ class SpeechLessonsPlugin(Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[speech_lessons] 写今天模型调用失败: %s", exc)
             return {"ok": False, "message": f"模型调用失败：{exc}"}
-        data = learner_mod._parse_json(raw or "")
-        merged = self._normalize_lines(
-            self._parse_lines(str((data or {}).get("content") or ""))
-        )[: self._journal_store_cap()]
-        if not merged:
-            return {"ok": False, "message": "模型没有返回可用的条目"}
-        # 修改不等于删除：覆盖时不自动划线；只有显式 remove 才留痕
+        data = learner_mod._parse_json(raw or "") or {}
+
+        if full_rewrite:
+            merged = self._normalize_lines(
+                self._parse_lines(str(data.get("content") or ""))
+            )[: self._journal_store_cap()]
+            if not merged:
+                return {"ok": False, "message": "模型没有返回可用的条目"}
+            try:
+                page_id = self._write_page_items(day, merged, "today")
+                self._journal_vec_at = 0.0
+                if self.embed.enabled:
+                    vec = await self.embed.embed(merged[:1200])
+                    if vec:
+                        self.store.journal_save_vector(
+                            page_id, vec, self.embed.model_label()
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[speech_lessons] 保存今天这页失败: %s", exc)
+                return {"ok": False, "message": f"保存失败：{exc}"}
+            logger.info(
+                "[speech_lessons] 用户重写 %s：%d 行 / %d 字（原页=%s）",
+                day,
+                len(self._parse_lines(merged)),
+                len(merged),
+                bool(existing),
+            )
+            return {
+                "ok": True,
+                "day": day,
+                "page_id": page_id,
+                "items": len(self._parse_lines(merged)),
+                "chars": len(merged),
+                "overwritten": bool(existing),
+                "mode": "rewrite",
+                "reason": str(data.get("reason") or "")[:200],
+            }
+
+        # ---------------- 增量模式：只增/划/改，绝不整页覆盖 ----------------
+        rows = self._page_items(existing_page) if existing_page else []
+        added = struck = updated = 0
+        for frag in data.get("strike") or []:
+            frag = str(frag or "").strip()
+            if not frag:
+                continue
+            hit = next(
+                (
+                    row
+                    for row in rows
+                    if str(row.get("kind")) != "struck" and frag in str(row.get("text", ""))
+                ),
+                None,
+            )
+            if hit is not None:
+                hit["kind"] = "struck"
+                struck += 1
+        for change in data.get("update") or []:
+            if not isinstance(change, dict):
+                continue
+            tgt = str(change.get("target") or "").strip()
+            body = str(change.get("content") or "").strip()
+            if not tgt or not body:
+                continue
+            hit = next(
+                (
+                    row
+                    for row in rows
+                    if str(row.get("kind")) != "struck" and tgt in str(row.get("text", ""))
+                ),
+                None,
+            )
+            if hit is not None:
+                hit["text"] = body[:100]
+                updated += 1
+        for line in data.get("add") or []:
+            body = str(line or "").strip().lstrip("-• ").strip()
+            if len(body) < 4 or len(body) > 200:
+                continue
+            if any(
+                body in str(row.get("text", "")) or str(row.get("text", "")) in body
+                for row in rows
+                if str(row.get("kind")) != "struck"
+            ):
+                continue
+            # 新条目插在页尾批注之前（批注始终留在页尾）
+            insert_at = len(rows)
+            while insert_at > 0 and str(rows[insert_at - 1].get("kind")) == "note":
+                insert_at -= 1
+            rows.insert(insert_at, {"kind": "item", "text": body})
+            added += 1
+
+        if not (added or struck or updated):
+            logger.info("[speech_lessons] 增量补今天：没有变化（%s）", day)
+            return {
+                "ok": True,
+                "day": day,
+                "mode": "incremental",
+                "added": 0,
+                "struck": 0,
+                "updated": 0,
+                "message": "今天没有需要补的条目",
+            }
         try:
-            page_id = self._write_page_items(day, merged, "today")
+            if existing_page:
+                page_id = int(existing_page["id"])
+                snapshot = self._save_items(page_id, day, rows)
+            else:
+                snapshot = self._render_items(rows)
+                page_id = self._write_page_items(day, snapshot, "today")
             self._journal_vec_at = 0.0
-            if self.embed.enabled:
-                vec = await self.embed.embed(merged[:1200])
-                if vec:
-                    self.store.journal_save_vector(page_id, vec, self.embed.model_label())
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[speech_lessons] 保存今天这页失败: %s", exc)
+            logger.warning("[speech_lessons] 增量写今天失败: %s", exc)
             return {"ok": False, "message": f"保存失败：{exc}"}
         logger.info(
-            "[speech_lessons] 已写 %s 这一页：%d 条 / %d 字（覆盖=%s）",
+            "[speech_lessons] 增量补 %s：新增 %d / 划掉 %d / 改写 %d",
             day,
-            len(self._parse_lines(merged)),
-            len(merged),
-            bool(existing),
+            added,
+            struck,
+            updated,
         )
         return {
             "ok": True,
             "day": day,
             "page_id": page_id,
-            "items": len(self._parse_lines(merged)),
-            "chars": len(merged),
-            "overwritten": bool(existing),
-            "reason": str((data or {}).get("reason") or "")[:200],
+            "mode": "incremental",
+            "added": added,
+            "struck": struck,
+            "updated": updated,
+            "items": len(self._parse_lines(snapshot)),
+            "chars": len(snapshot),
         }
 
     def _today_learned_lines(self, day: str) -> list[str]:
@@ -2599,7 +2725,7 @@ class SpeechLessonsPlugin(Star):
         - delete_line：物理删除某一行（target=日期，line=行号）
         - search：按关键词找写过类似内容的日子
         - append：往今天追加条目
-        - save / write：整页覆盖（target=日期，content=完整全文；能用行号操作就别用它）
+        - save / write / replace：**已禁用**（整页重写是主人的权限，只有面板「重写今日」能做）
         - update / remove：按文本片段改/划（备用）
         - replace：整本替换（仅主人私聊）
 
@@ -2732,29 +2858,13 @@ class SpeechLessonsPlugin(Star):
             return f"已处理 {page['day']}（现在 {len(self._parse_lines(snapshot))} 行）。"
 
         if act in {"save", "write", "replace"}:
-            if act == "replace":
-                page = _page_by_target(today)
-                day = today
-            else:
-                page = _page_by_target(tgt) if tgt else None
-                day = str(page["day"]) if page else today
-            if not text:
-                return f"{act} 需要 content。"
-            parsed = self._parse_lines(text)
-            if not parsed:
-                return "content 里没有可用的行。"
-            items = [{"kind": k, "text": b} for k, b in parsed]
-            if page:
-                page_id = int(page["id"])
-            else:
-                page_id = self.store.journal_upsert(day, "", source="panel")
-                page = self.store.journal_page(page_id)
-            snapshot = self._save_items(page_id, day, items)
-            if len(snapshot) > self._journal_store_cap():
-                return f"内容太长了（上限 {self._journal_store_cap()} 字）。"
-            await self._journal_after_write(page_id)
-            logger.info("[speech_lessons] 整页写入 %s（%d 行）", day, len(items))
-            return f"已写好 {day}（{len(items)} 行）。"
+            # 整页重写是主人的权限：只有面板上亲手点「重写今日」才会整页覆盖。
+            # AI 自己只能增/删/改条目，绝不允许把整天内容重写一遍。
+            return (
+                "整页重写不行——那会把你今天已有的记录整篇覆盖掉。"
+                "你只能改条目：set_line / strike_line / insert_after / delete_line，"
+                "或者 append 追加；要重写整天，让主人自己在面板点「重写今日」。"
+            )
 
         if act == "append":
             if not text:
