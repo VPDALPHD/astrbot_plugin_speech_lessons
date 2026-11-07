@@ -108,5 +108,147 @@
     "description": "权重跌到这个值以下就归档（不再注入）",
     "type": "float",
     "default": 0.3
+  },
+  "max_cards_per_learn": {
+    "description": "单次最多提炼几张说话卡",
+    "type": "int",
+    "default": 5,
+    "hint": "从一段视频/长文学习时，多个要点可以各出一张卡。私聊即时教学一般 1-3 张就够。"
+  },
+  "learn_note_max_chars": {
+    "description": "喂给提炼模型的教学材料字数上限",
+    "type": "int",
+    "default": 8000,
+    "hint": "B站点播学习时会把视频内容整段喂进来，太小会导致多个要点被截断、只剩一张卡。"
+  },
+  "emb_enabled": {
+    "description": "启用向量（语义判重 + 选卡打分）",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后：①新卡与已有卡语义相似度≥阈值就合并成同一张（不再重复登记）；②注入前按当前消息与卡片场景的相似度加权优先选。关闭或调用失败时自动退回纯字面逻辑。"
+  },
+  "emb_api_base": {
+    "description": "Embedding API Base URL",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 用 AstrBot 自带的 embedding provider。填 OpenAI 兼容地址即可（会自动补 /embeddings）。"
+  },
+  "emb_api_key": {
+    "description": "Embedding API Key",
+    "type": "string",
+    "default": "",
+    "hint": "只在填了 Base URL + 模型名时使用。"
+  },
+  "emb_model": {
+    "description": "Embedding 模型名",
+    "type": "string",
+    "default": "",
+    "hint": "如 text-embedding-v4 / bge-m3。留空 = 用 AstrBot 自带接口。"
+  },
+  "emb_provider_id": {
+    "description": "AstrBot embedding provider id",
+    "type": "string",
+    "default": "",
+    "hint": "走 AstrBot 接口时可指定用哪个 provider；留空则用第一个可用的 embedding provider。"
+  },
+  "emb_dim": {
+    "description": "嵌入维度",
+    "type": "int",
+    "default": 1024,
+    "hint": "默认 1024。换模型/维度后旧向量自动失效（按模型标识隔离），不会拿不同维度的向量互相比。"
+  },
+  "emb_similar_threshold": {
+    "description": "判重相似度阈值",
+    "type": "float",
+    "default": 0.88,
+    "hint": "0.5~0.99。越高越保守（只有非常像才合并）；建议 0.86~0.92。"
+  },
+  "emb_pick_boost": {
+    "description": "选卡语义加成",
+    "type": "float",
+    "default": 0.6,
+    "hint": "相似度乘以这个系数后加到卡片权重上参与排序。0 表示只判重、不参与选卡。"
+  },
+  "emb_mode": {
+    "description": "向量接入方式",
+    "type": "string",
+    "default": "astrbot",
+    "options": [
+      "astrbot",
+      "manual"
+    ],
+    "hint": "astrbot = 用平台已配置的 embedding 模型（推荐，先在下拉里选模型）；manual = 自己填 Base URL / API Key / 模型名走独立接口。"
+  },
+  "guide_enabled": {
+    "description": "注入「人类伪装指南」（日记）",
+    "type": "bool",
+    "default": true,
+    "hint": "关掉后不再注入，但她仍可以自己续写日记。"
+  },
+  "guide_max_chars": {
+    "description": "每轮读书字数上限",
+    "type": "int",
+    "default": 8000,
+    "hint": "每轮只读最近几页（+ 关键词翻到的旧页），不是整本；超预算时先保最近的页。"
+  },
+  "guide_inject_days": {
+    "description": "每轮读最近几天的记录",
+    "type": "int",
+    "default": 2,
+    "hint": "以「天」为单位：默认读今天和昨天的全部记录；一天写多了会占多张纸，不影响读取。"
+  },
+  "guide_recall_pages": {
+    "description": "按关键词最多翻几页旧页",
+    "type": "int",
+    "default": 2,
+    "hint": "按当前这句话的语义去旧页里找相关的，找到才注入；0 = 不回忆。"
+  },
+  "guide_recall_threshold": {
+    "description": "语义兜底召回相似度阈值",
+    "type": "float",
+    "default": 0.45,
+    "hint": "相似度低于它就不注入；越高越保守。"
+  },
+  "guide_similar_threshold": {
+    "description": "写前查重的相似度阈值",
+    "type": "float",
+    "default": 0.8,
+    "hint": "她写新观察前先查旧账；相似度高于它就把旧条目摊开让她决定：改写，还是划掉重写。"
+  },
+  "guide_autowrite_enabled": {
+    "description": "允许她自己写这本指南书",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，她可以在聊天/看视频后自己往这本子里写条目（工具 edit_human_guide：list/read/search/append/write/update/remove/replace）。"
+  },
+  "guide_autowrite_owner_only": {
+    "description": "只允许主人在场时写入",
+    "type": "bool",
+    "default": true,
+    "hint": "关掉则任何人都能触发写入（不推荐）。"
+  },
+  "guide_autowrite_group_admin": {
+    "description": "群聊里也允许自动写入",
+    "type": "bool",
+    "default": true,
+    "hint": "仅当“只允许主人在场”开启时有效：允许群聊中由管理员会话触发写入。"
+  },
+  "guide_review_enabled": {
+    "description": "每天定时写今天这一页",
+    "type": "bool",
+    "default": true,
+    "hint": "到点后按当天对话写今天这一页（已有则覆盖），不做整本重写。"
+  },
+  "guide_review_max_input": {
+    "description": "当天对话素材字数上限",
+    "type": "int",
+    "default": 6000,
+    "hint": "从 AstrBot 会话库抽当天对话，超过就截断。"
+  },
+  "guide_review_hour": {
+    "description": "定时写今天的时间（整点 0-23）",
+    "type": "int",
+    "default": 21,
+    "hint": "每天到这个整点后写一页今天；0=凌晨，23=晚上11点。"
   }
 }

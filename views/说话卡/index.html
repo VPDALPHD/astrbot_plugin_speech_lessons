@@ -2,9 +2,11 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
+    <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="pragma" content="no-cache" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>说话卡面板</title>
-    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./style.css?v=4.2.0" />
   </head>
   <body>
     <header class="top">
@@ -24,6 +26,59 @@
         <button data-status="all">全部</button>
       </div>
       <button id="new-btn" class="primary">＋ 新建卡片</button>
+      <button id="cfg-btn" class="ghost" title="插件设置">⚙ 设置</button>
+    </section>
+
+    <section class="book-wrap" id="book-card">
+      <div class="book-stage" id="book-stage">
+        <div class="book" id="book" role="button" tabindex="0" aria-label="点击翻开指南书">
+          <div class="book-spread">
+            <div class="book-page left">
+              <div class="book-page-head">
+                <span class="book-page-no" id="book-page-no-left">—</span>
+                <span class="book-page-day" id="book-page-day-left"></span>
+              </div>
+              <div class="book-items" id="book-items-left"><div class="book-empty"></div></div>
+              <div class="book-page-foot" id="book-page-foot-left"></div>
+            </div>
+            <div class="book-page right">
+              <div class="book-page-head">
+                <span class="book-page-no" id="book-page-no-right">—</span>
+                <span class="book-page-day" id="book-page-day-right"></span>
+              </div>
+              <div class="book-items" id="book-items-right"><div class="book-empty"></div></div>
+              <div class="book-page-foot" id="book-page-foot-right"></div>
+            </div>
+          </div>
+          <div class="book-cover" id="book-cover">
+            <div class="book-cover-inner">
+              <div class="book-kicker">人类伪装指南</div>
+              <div class="book-title">我 的 手 记</div>
+              <div class="book-cover-sub" id="book-cover-sub">共 0 页</div>
+              <div class="book-hint">点一下，翻开</div>
+            </div>
+            <div class="book-ribbon" aria-hidden="true"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="book-updated" id="book-updated"></div>
+      <div class="book-toolbar">
+        <button id="book-prev" class="ghost" title="上一页">‹</button>
+        <span class="book-indicator" id="book-indicator">— / —</span>
+        <button id="book-next" class="ghost" title="下一页">›</button>
+        <span class="book-sep" aria-hidden="true"></span>
+        <input id="book-search" class="book-search" type="search" placeholder="输关键词翻旧页，回车" />
+        <button id="book-edit" class="ghost">编辑</button>
+        <button id="book-review" class="ghost">重写今日</button>
+        <label class="switch-inline" title="关闭后不再注入，但她仍可自己续写">
+          <input type="checkbox" id="guide-toggle" />
+          <span class="track"></span>
+          <span class="switch-text">注入</span>
+        </label>
+      </div>
+      <p class="guide-meta" id="guide-meta">每轮只读最近几页，不是整本。</p>
+      <div id="book-search-hit" class="book-search-hit hidden"></div>
     </section>
 
     <main id="list" class="list">
@@ -74,6 +129,66 @@
     </div>
 
     <div id="toast" class="toast"></div>
-    <script type="module" src="./app.js"></script>
+
+    <div id="cfg-mask" class="mask hidden">
+      <div class="dialog wide" role="dialog" aria-modal="true">
+        <div class="dialog-head">
+          <h2>教我说话 · 设置</h2>
+          <button id="cfg-close" class="icon" title="关闭">✕</button>
+        </div>
+        <div class="dialog-body" id="cfg-body">
+          <p class="hint">加载中…</p>
+        </div>
+        <div class="dialog-foot">
+          <span id="cfg-err" class="err"></span>
+          <button id="cfg-cancel" class="ghost">取消</button>
+          <button id="cfg-save" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="guide-mask" class="mask hidden">
+      <div class="dialog wide" role="dialog" aria-modal="true">
+        <div class="dialog-head">
+          <h2 id="guide-dlg-title">编辑这一页</h2>
+          <button id="guide-dlg-close" class="icon" title="关闭">✕</button>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span>日期 <em>这一页记在哪天；同一天会覆盖那一页</em></span>
+            <input id="guide-day" type="date" />
+          </label>
+          <label class="field">
+            <span>条目</span>
+            <textarea id="guide-text" rows="14" placeholder="1. 我发现人聊天经常不把话说完，留半句等我接，我别急着替人补完。&#10;2. 我以前一上来就想总结成三点，其实人不会这么说话，我以后先顺着说一句。&#10;3. 人被夸第一反应往往是“哪有”，然后才笑，我别急着谦虚。"></textarea>
+          </label>
+          <p class="hint" id="guide-count">0 字</p>
+        </div>
+        <div class="dialog-foot">
+          <span id="guide-err" class="err"></span>
+          <button id="guide-cancel" class="ghost">取消</button>
+          <button id="guide-save" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="confirm-mask" class="mask hidden">
+      <div class="dialog confirm-dialog" role="dialog" aria-modal="true">
+        <div class="dialog-head">
+          <h2>确认</h2>
+          <button id="confirm-close" class="icon" title="关闭">✕</button>
+        </div>
+        <div class="dialog-body">
+          <p class="confirm-text" id="confirm-text">确定重写今日记录吗？</p>
+        </div>
+        <div class="dialog-foot">
+          <span class="err"></span>
+          <button id="confirm-cancel" class="ghost">取消</button>
+          <button id="confirm-ok" class="primary">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./app.v4900.js"></script>
   </body>
 </html>

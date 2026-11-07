@@ -48,6 +48,52 @@ CREATE TABLE IF NOT EXISTS cards (
 );
 CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
 CREATE INDEX IF NOT EXISTS idx_cards_fp ON cards(card_fp);
+CREATE TABLE IF NOT EXISTS card_vectors (
+    card_id          INTEGER PRIMARY KEY,
+    model            TEXT    NOT NULL DEFAULT '',
+    dim              INTEGER NOT NULL DEFAULT 0,
+    vec              TEXT    NOT NULL DEFAULT '[]',
+    updated_at       REAL    NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_card_vectors_model ON card_vectors(model);
+CREATE TABLE IF NOT EXISTS guide (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    content          TEXT    NOT NULL DEFAULT '',
+    updated_at       REAL    NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS journal_pages (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    day              TEXT    NOT NULL,
+    content          TEXT    NOT NULL DEFAULT '',
+    source           TEXT    NOT NULL DEFAULT 'auto',
+    use_count        INTEGER NOT NULL DEFAULT 0,
+    last_used_at     REAL    NOT NULL DEFAULT 0,
+    recall_count     INTEGER NOT NULL DEFAULT 0,
+    created_at       REAL    NOT NULL,
+    updated_at       REAL    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_journal_day ON journal_pages(day);
+CREATE TABLE IF NOT EXISTS journal_vectors (
+    page_id          INTEGER PRIMARY KEY,
+    model            TEXT    NOT NULL DEFAULT '',
+    dim              INTEGER NOT NULL DEFAULT 0,
+    vec              TEXT    NOT NULL DEFAULT '[]',
+    updated_at       REAL    NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_journal_vectors_model ON journal_vectors(model);
+CREATE TABLE IF NOT EXISTS journal_items (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_id          INTEGER NOT NULL,
+    day              TEXT    NOT NULL DEFAULT '',
+    kind             TEXT    NOT NULL DEFAULT 'item',
+    seq              INTEGER NOT NULL DEFAULT 0,
+    text             TEXT    NOT NULL DEFAULT '',
+    created_at       REAL    NOT NULL,
+    updated_at       REAL    NOT NULL,
+    hit_count        INTEGER NOT NULL DEFAULT 0,
+    last_hit_at      REAL    NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_journal_items_page ON journal_items(page_id, seq);
 """
 
 MIN_EF = 1.3
@@ -105,6 +151,7 @@ class CardStore:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
             self._archive_legacy()
+        self.journal_migrate_from_guide()
 
     def _archive_legacy(self) -> None:
         """v1.0.0 的 lessons 表整表归档：那些正则抽出来的句子不可用。"""
@@ -138,19 +185,37 @@ class CardStore:
         source: str = "text",
         weight: float = 1.5,
         raw_text: str = "",
+        embedding: list[float] | None = None,
+        embedding_model: str = "",
+        similar_threshold: float = 0.0,
     ) -> tuple[int, bool]:
-        """新增一张卡。返回 (id, 是否新建)。同指纹的旧卡只加强权重。"""
+        """新增一张卡。返回 (id, 是否新建)。同指纹的旧卡只加强权重。
+
+        ``embedding`` + ``similar_threshold`` 一起给时，先用向量余弦找近似卡：
+        相似度 ≥ 阈值就当成同一张（只升权重、补要点），否则才新建。
+        """
         if not good and not bad:
             return 0, False
         now = time.time()
         fp = card_fp(scene, bad, good)
         tag_json = json.dumps(list(tags or []), ensure_ascii=False)
         with self._lock:
+            # ① 指纹命中（字面完全相同）
             row = self._conn.execute(
                 "SELECT id, weight, principle FROM cards WHERE card_fp=? AND status='active' "
                 "ORDER BY id DESC LIMIT 1",
                 (fp,),
             ).fetchone()
+            if row is None and embedding and similar_threshold > 0:
+                # ② 语义近似
+                near = self._find_similar_locked(
+                    embedding, embedding_model, similar_threshold
+                )
+                if near is not None:
+                    row = self._conn.execute(
+                        "SELECT id, weight, principle FROM cards WHERE id=?",
+                        (near[0],),
+                    ).fetchone()
             if row:
                 new_weight = min(3.0, float(row["weight"]) + 0.4)
                 # 同一张卡又教一遍：原则可以更新成更准的说法
@@ -183,8 +248,91 @@ class CardStore:
                 ),
             )
             new_id = int(cur.lastrowid or 0)
+            if new_id and embedding:
+                self._save_vector_locked(new_id, embedding, embedding_model, now)
             self._conn.commit()
             return new_id, True
+
+    # ------------------------------------------------------------------ 向量
+    def _save_vector_locked(
+        self, card_id: int, vec: list[float], model: str, now: float
+    ) -> None:
+        try:
+            payload = json.dumps([round(float(x), 6) for x in vec], separators=(",", ":"))
+        except (TypeError, ValueError):
+            return
+        self._conn.execute(
+            "INSERT INTO card_vectors (card_id, model, dim, vec, updated_at)"
+            " VALUES (?,?,?,?,?)"
+            " ON CONFLICT(card_id) DO UPDATE SET model=excluded.model,"
+            " dim=excluded.dim, vec=excluded.vec, updated_at=excluded.updated_at",
+            (int(card_id), str(model or ""), len(vec), payload, float(now)),
+        )
+
+    def save_vector(self, card_id: int, vec: list[float], model: str = "") -> bool:
+        if not card_id or not vec:
+            return False
+        with self._lock:
+            self._save_vector_locked(int(card_id), vec, model, time.time())
+            self._conn.commit()
+        return True
+
+    def vectors(self, model: str = "") -> dict[int, list[float]]:
+        """取某模型下的全部向量（card_id → vec）。换模型后旧向量自动不参与比对。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT card_id, vec FROM card_vectors WHERE model=?", (str(model or ""),)
+            ).fetchall()
+        out: dict[int, list[float]] = {}
+        for row in rows:
+            try:
+                vec = [float(x) for x in json.loads(row["vec"] or "[]")]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if vec:
+                out[int(row["card_id"])] = vec
+        return out
+
+    def _find_similar_locked(
+        self, vec: list[float], model: str, threshold: float
+    ) -> tuple[int, float] | None:
+        from .embedding import cosine
+
+        rows = self._conn.execute(
+            "SELECT v.card_id, v.vec FROM card_vectors v"
+            " JOIN cards c ON c.id = v.card_id"
+            " WHERE v.model=? AND c.status='active'",
+            (str(model or ""),),
+        ).fetchall()
+        best: tuple[int, float] | None = None
+        for row in rows:
+            try:
+                other = [float(x) for x in json.loads(row["vec"] or "[]")]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            score = cosine(vec, other)
+            if score >= threshold and (best is None or score > best[1]):
+                best = (int(row["card_id"]), score)
+        return best
+
+    def find_similar(
+        self, vec: list[float], model: str = "", threshold: float = 0.88
+    ) -> tuple[int, float] | None:
+        if not vec:
+            return None
+        with self._lock:
+            return self._find_similar_locked(list(vec), model, threshold)
+
+    def vector_count(self, model: str = "") -> int:
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM card_vectors WHERE model=?",
+                    (str(model or ""),),
+                ).fetchone()
+            return int(row["n"]) if row else 0
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------ 查询
     @staticmethod
@@ -472,6 +620,413 @@ class CardStore:
             )
             self._conn.commit()
             return int(cur.rowcount or 0)
+
+    # ------------------------------------------------------------ 人类伪装指南
+    def get_guide(self) -> str:
+        """取「人类伪装指南」正文（单行表，没有就返回空串）。"""
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT content FROM guide WHERE id=1"
+                ).fetchone()
+            return str(row["content"] or "") if row else ""
+        except Exception:
+            return ""
+
+    def save_guide(self, content: str) -> bool:
+        text = str(content or "").strip()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO guide (id, content, updated_at) VALUES (1, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET content=excluded.content,"
+                " updated_at=excluded.updated_at",
+                (text, time.time()),
+            )
+            self._conn.commit()
+        return True
+
+    # ------------------------------------------------------------ 人类伪装指南 · 日记
+    def journal_migrate_from_guide(self) -> None:
+        """旧版「一整篇指南」迁移成第一篇日记（只迁移一次，原表保留不动）。"""
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM journal_pages"
+                ).fetchone()
+                if row and int(row["n"] or 0) > 0:
+                    return
+                old = self._conn.execute(
+                    "SELECT content, updated_at FROM guide WHERE id=1"
+                ).fetchone()
+            if not old or not str(old["content"] or "").strip():
+                return
+            ts = float(old["updated_at"] or time.time())
+            day = time.strftime("%Y-%m-%d", time.localtime(ts))
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO journal_pages (day, content, source, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (day, str(old["content"]).strip(), "legacy", ts, ts),
+                )
+                self._conn.commit()
+            logger.info(
+                "[speech_lessons] 旧版指南已迁移为日记第一页（%s，%d 字）",
+                day,
+                len(str(old["content"]).strip()),
+            )
+        except Exception:  # noqa: BLE001 - 迁移失败不影响启动
+            return
+
+    @staticmethod
+    def _to_page(row: sqlite3.Row) -> dict:
+        content = str(row["content"] or "")
+        return {
+            "id": int(row["id"]),
+            "day": str(row["day"] or ""),
+            "content": content,
+            "chars": len(content.strip()),
+            "source": str(row["source"] or ""),
+            "use_count": int(row["use_count"] or 0),
+            "recall_count": int(row["recall_count"] or 0),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def journal_pages(self, limit: int = 200) -> list[dict]:
+        """按日期倒序取日记页（新的在前）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM journal_pages ORDER BY day DESC, id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [self._to_page(r) for r in rows]
+
+    def journal_recent(self, limit: int = 2) -> list[dict]:
+        """最近 N 页，返回时按时间正序（方便按先后读）。"""
+        pages = self.journal_pages(limit=max(1, int(limit)))
+        return list(reversed(pages))
+
+    def journal_page(self, page_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM journal_pages WHERE id=?", (int(page_id),)
+            ).fetchone()
+        return self._to_page(row) if row else None
+
+    def journal_search(self, keyword: str, limit: int = 5) -> list[dict]:
+        """按关键词翻页：正文模糊匹配（关键词查询用）。"""
+        word = str(keyword or "").strip()
+        if not word:
+            return []
+        like = f"%{word}%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM journal_pages WHERE content LIKE ?"
+                " ORDER BY day DESC, id DESC LIMIT ?",
+                (like, max(1, int(limit))),
+            ).fetchall()
+        return [self._to_page(r) for r in rows]
+
+    def journal_page_by_day(self, day: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM journal_pages WHERE day=?", (str(day or ""),)
+            ).fetchone()
+        return self._to_page(row) if row else None
+
+    def journal_upsert(self, day: str, content: str, source: str = "panel") -> int:
+        """按天写一页：已有就整页覆盖，没有就新建。"""
+        text = str(content or "").strip()
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, created_at FROM journal_pages WHERE day=?", (str(day),)
+            ).fetchone()
+            if row:
+                self._conn.execute(
+                    "UPDATE journal_pages SET content=?, source=?, updated_at=? WHERE id=?",
+                    (text, str(source or "panel"), now, int(row["id"])),
+                )
+                page_id = int(row["id"])
+            else:
+                cur = self._conn.execute(
+                    "INSERT INTO journal_pages (day, content, source, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (str(day), text, str(source or "panel"), now, now),
+                )
+                page_id = int(cur.lastrowid or 0)
+            self._conn.commit()
+        return page_id
+
+    def journal_append(self, day: str, text: str, source: str = "auto") -> tuple[int, bool]:
+        """往某天的日记后面续一段（同页重复内容会跳过）。返回 (页 id, 是否写入)。"""
+        chunk = str(text or "").strip()
+        if not chunk:
+            page = self.journal_page_by_day(day)
+            return (int(page["id"]) if page else 0), False
+        page = self.journal_page_by_day(day)
+        if page and chunk in str(page["content"] or ""):
+            return int(page["id"]), False
+        if not page:
+            return self.journal_upsert(day, chunk, source), True
+        merged = (str(page["content"] or "").rstrip() + "\n\n" + chunk).strip()
+        return self.journal_upsert(day, merged, source), True
+
+    def journal_delete(self, page_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM journal_pages WHERE id=?", (int(page_id),)
+            )
+            self._conn.execute(
+                "DELETE FROM journal_vectors WHERE page_id=?", (int(page_id),)
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def journal_replace_all(self, pages: list[dict], source: str = "review") -> int:
+        """整本日记重写：清空后按页写入（精炼用）。"""
+        now = time.time()
+        rows = []
+        for page in pages:
+            day = str(page.get("day") or "").strip()
+            content = str(page.get("content") or "").strip()
+            if not day or not content:
+                continue
+            rows.append((day, content, str(source or "review"), now, now))
+        with self._lock:
+            self._conn.execute("DELETE FROM journal_pages")
+            self._conn.execute("DELETE FROM journal_vectors")
+            for row in rows:
+                self._conn.execute(
+                    "INSERT INTO journal_pages (day, content, source, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?)",
+                    row,
+                )
+            self._conn.commit()
+        return len(rows)
+
+    def journal_stats(self) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS pages, COALESCE(SUM(LENGTH(content)),0) AS chars,"
+                " MAX(day) AS latest_day, MAX(updated_at) AS latest_at"
+                " FROM journal_pages"
+            ).fetchone()
+        return {
+            "pages": int(row["pages"] or 0) if row else 0,
+            "chars": int(row["chars"] or 0) if row else 0,
+            "latest_day": str(row["latest_day"] or "") if row else "",
+            "latest_at": float(row["latest_at"] or 0) if row else 0.0,
+        }
+
+    def journal_touch(self, ids: Iterable[int]) -> None:
+        now = time.time()
+        ids = [int(i) for i in ids if i]
+        if not ids:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE journal_pages SET use_count=use_count+1, last_used_at=? WHERE id=?",
+                [(now, i) for i in ids],
+            )
+            self._conn.commit()
+
+    def journal_mark_recall(self, ids: Iterable[int]) -> None:
+        """被「想起」的旧页记一次召回，用于以后判断哪些页还活着。"""
+        ids = [int(i) for i in ids if i]
+        if not ids:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE journal_pages SET recall_count=recall_count+1 WHERE id=?",
+                [(i,) for i in ids],
+            )
+            self._conn.commit()
+
+    def journal_save_vector(self, page_id: int, vec: list[float], model: str = "") -> bool:
+        if not page_id or not vec:
+            return False
+        try:
+            payload = json.dumps([round(float(x), 6) for x in vec], separators=(",", ":"))
+        except (TypeError, ValueError):
+            return False
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO journal_vectors (page_id, model, dim, vec, updated_at)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT(page_id) DO UPDATE SET model=excluded.model,"
+                " dim=excluded.dim, vec=excluded.vec, updated_at=excluded.updated_at",
+                (int(page_id), str(model or ""), len(vec), payload, time.time()),
+            )
+            self._conn.commit()
+        return True
+
+    def journal_vectors(self, model: str = "") -> dict[int, list[float]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT page_id, vec FROM journal_vectors WHERE model=?",
+                (str(model or ""),),
+            ).fetchall()
+        out: dict[int, list[float]] = {}
+        for row in rows:
+            try:
+                vec = [float(x) for x in json.loads(row["vec"] or "[]")]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if vec:
+                out[int(row["page_id"])] = vec
+        return out
+
+    def journal_vector_count(self, model: str = "") -> int:
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM journal_vectors WHERE model=?",
+                    (str(model or ""),),
+                ).fetchone()
+            return int(row["n"]) if row else 0
+        except Exception:
+            return 0
+
+    # ------------------------------------------------------------ 结构化条目
+    def journal_items(self, page_id: int) -> list[dict]:
+        """取某一页的行（按 seq 升序）：kind=item/note/struck。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM journal_items WHERE page_id=? ORDER BY seq ASC, id ASC",
+                (int(page_id),),
+            ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "page_id": int(r["page_id"]),
+                "day": str(r["day"] or ""),
+                "kind": str(r["kind"] or "item"),
+                "seq": int(r["seq"] or 0),
+                "text": str(r["text"] or ""),
+                "hit_count": int(r["hit_count"] or 0),
+            }
+            for r in rows
+        ]
+
+    def journal_items_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM journal_items").fetchone()
+        return int(row["n"]) if row else 0
+
+    def journal_replace_items(
+        self, page_id: int, day: str, items: list[dict], snapshot: str
+    ) -> None:
+        """整页替换：清掉该页旧行、按顺序写入新行，并更新 content 快照。"""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM journal_items WHERE page_id=?", (int(page_id),)
+            )
+            for index, item in enumerate(items, 1):
+                kind = str(item.get("kind") or "item")
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                self._conn.execute(
+                    "INSERT INTO journal_items (page_id, day, kind, seq, text, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (int(page_id), str(day or ""), kind, index, text, now, now),
+                )
+            self._conn.execute(
+                "UPDATE journal_pages SET content=?, updated_at=? WHERE id=?",
+                (str(snapshot or ""), now, int(page_id)),
+            )
+            self._conn.commit()
+
+    def journal_item(self, item_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM journal_items WHERE id=?", (int(item_id),)
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "page_id": int(row["page_id"]),
+            "day": str(row["day"] or ""),
+            "kind": str(row["kind"] or "item"),
+            "seq": int(row["seq"] or 0),
+            "text": str(row["text"] or ""),
+        }
+
+    def journal_update_item(
+        self, item_id: int, *, text: str | None = None, kind: str | None = None
+    ) -> bool:
+        sets: list[str] = []
+        params: list[Any] = []
+        if text is not None:
+            sets.append("text=?")
+            params.append(str(text).strip())
+        if kind is not None:
+            sets.append("kind=?")
+            params.append(str(kind))
+        if not sets:
+            return False
+        sets.append("updated_at=?")
+        params.append(time.time())
+        params.append(int(item_id))
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE journal_items SET " + ", ".join(sets) + " WHERE id=?",
+                tuple(params),
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def journal_delete_item(self, item_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM journal_items WHERE id=?", (int(item_id),)
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def journal_insert_item(
+        self, page_id: int, day: str, after_seq: int, kind: str, text: str
+    ) -> int:
+        """在某行之后插入一行（after_seq=0 表示插到最前面）。"""
+        now = time.time()
+        body = str(text or "").strip()
+        if not body:
+            return 0
+        with self._lock:
+            self._conn.execute(
+                "UPDATE journal_items SET seq=seq+1 WHERE page_id=? AND seq>?",
+                (int(page_id), int(after_seq)),
+            )
+            cur = self._conn.execute(
+                "INSERT INTO journal_items (page_id, day, kind, seq, text, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (
+                    int(page_id),
+                    str(day or ""),
+                    str(kind or "item"),
+                    int(after_seq) + 1,
+                    body,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def journal_touch_items(self, ids: Iterable[int]) -> None:
+        ids = [int(i) for i in ids if i]
+        if not ids:
+            return
+        now = time.time()
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE journal_items SET hit_count=hit_count+1, last_hit_at=? WHERE id=?",
+                [(now, i) for i in ids],
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         try:

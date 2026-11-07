@@ -1,11 +1,25 @@
-# 教我说话 v2 —— 设计说明
+# 教我说话
 
 ![封面](logo.png)
 
 > 作者：**VPDALPHD，DS_CHAN** ｜ 许可证 MIT ｜ 仓库 <https://github.com/VPDALPHD/astrbot_plugin_speech_lessons>
 > 版本历史见 [CHANGELOG.md](CHANGELOG.md)（也显示在面板「插件详情 → 更新日志」）
 
-## 面板可视化视图（v2.2.0）
+## 这是什么
+
+私聊里用一句「这样不对，AI 味太重」把你的说话方式教给 AI；再给它一本会自己续写的
+**《人类伪装指南》**，让它长期记住"人类怎么说话"。
+
+- **说话卡**：场景 / 反例原文 / 正例原文 / 一句要点，由模型从你的原话提炼，下一轮就能用。
+- **人类伪装指南**：按天写的观察笔记，一天一页，每轮优先注入；可翻页、可编辑、可划掉。
+- **看图学**：聊天截图、优秀范例截图都能学（需模型支持图片输入）。
+- **真复习**：你说"对/就是这样"才推进间隔，说"不对"就降权；久不用的卡自动淡忘归档。
+
+实现要点：私聊钩子挂 250000 优先级（早于陪伴插件的 `stop_event`）+ 9 秒防抖合并；
+提炼照抄原文不润色；写入前向量判重；注入走 `extra_user_content_parts` 临时片段，
+不动 `system_prompt`；数据全部落本地 SQLite，无第三方依赖。
+
+## 面板可视化视图
 
 插件自带一个管理面板，重载插件后出现在 WebUI 左侧 **「扩展功能 → 插件视图 → 教我说话」**
 （也可以从 插件管理 → 教我说话 → 视图 进入）。
@@ -29,6 +43,33 @@
 | `cards/<id>/archive` | POST | 归档 |
 | `cards/<id>/restore` | POST | 恢复 |
 | `cards/<id>/delete` | POST | 彻底删除 |
+| `config` | GET | 配置项字段表 + 当前值 + 平台模型列表 |
+| `config/save` | POST | 保存配置（白名单键） |
+| `embedding/test` | POST | 测试向量接口 |
+| `embedding/providers` | GET | 平台 embedding / chat 模型列表 |
+| `guide` | GET | 读「人类伪装指南」（兼容旧接口） |
+| `guide/save` | POST | 保存「人类伪装指南」（兼容旧接口） |
+| `journal/page` | GET | 读某一天的书页 |
+| `journal/save` | POST | 保存某一天的书页 |
+| `journal/search` | GET | 关键词翻旧页 |
+| `journal/write_today` | POST | 写/重写今天 |
+| `journal/toggle` | POST | 开关指南注入 |
+| `journal/delete` | POST | 删除某一天 |
+
+## 给其他插件用：外部联动接口（v2.4.0+）
+
+本插件对外暴露一个只读门面 `public_api()`，别的插件可以用它复用「人类伪装指南 + 说话卡」，
+或者把教学材料交给本插件提炼。**完整接口手册见 [docs/EXTENSION_API.md](docs/EXTENSION_API.md)**。
+
+```python
+api = find_speech_lessons_api(context)          # 见手册里的发现代码
+block, ids = api["render_block"](scene_text)    # 同步调用，返回可直接拼进 prompt 的文本
+```
+
+一句话总结：
+- `render_block(text)` → `(指南 + 说话卡的文本块, 用到的卡 id)`，没有内容返回 `("", [])`；
+- `pick_cards(text)` → 结构化卡片列表；
+- `await learn_from_note(note)` → 把优秀范例提炼成说话卡（顺带把通用准则写进指南）。
 
 ## 兼容性测试
 

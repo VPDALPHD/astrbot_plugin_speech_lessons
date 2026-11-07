@@ -25,7 +25,7 @@ LEARN_PROMPT = """你在帮一个 AI 学习"怎么说话"。主人刚给了它�
 请判断：主人这次是不是在教它说话/教它换个说法？
 只是普通聊天、提问、撒娇、陈述事实 → is_teaching = false。
 
-是 → 提炼 1~3 张「说话卡」。严格要求：
+是 → 提炼「说话卡」，最多 <<MAX_CARDS>> 张。严格要求：
 1. bad / good 必须尽量用**原文**（主人打的字、我上一轮的回复、图片里的原话），
    不要自己改写、不要润色，不要编造主人没说过的示范。
 2. 主人说了「而不是 X」「别 X」「不要 X」「不要老是 X」时，
@@ -37,11 +37,19 @@ LEARN_PROMPT = """你在帮一个 AI 学习"怎么说话"。主人刚给了它�
 6. scene 写"什么场面用"：对方说什么话、什么情绪、什么场合；通用的留空。
 7. principle 是一句照做就行的话，不超过 50 字，写「说话方式」而不是「态度口号」。
 8. 图片可能是聊天截图：把截图里主人的纠正和合格回复的关键原话抄进 bad / good。
-9. 宁少勿滥。只有一条真实可用的做法，就只给一张卡。
+9. 宁少勿滥；但材料里确实有多条可迁移的说法时，每条各出一张卡，不要全部压成一张。
+10. 如果材料是一段视频/长文的内容描述（不是主人当面的纠正）：把里面**每一条可复用的表达方式或句式**各出一张卡
+    （例如怎么开场、怎么接梗、怎么吐槽、怎么讲道理），scene 填适用的评论区/聊天场景，bad 可留空。
 
 只输出 JSON，不要解释、不要 markdown：
 {"is_teaching": true, "confidence": 0.0-1.0,
- "cards": [{"scene": "", "bad": "", "good": "", "principle": "", "tags": ["语气"], "confidence": 0.0-1.0}]}
+ "cards": [{"scene": "", "bad": "", "good": "", "principle": "", "tags": ["语气"], "confidence": 0.0-1.0}],
+ "guide_notes": ["人类……"]}
+
+额外字段 guide_notes：材料里如果有**不适合做成说话卡**、但属于「人类怎么说话、怎么反应」的观察，
+写成一句以「人类」开头的观察笔记；需要时可补一句极简的“我可以/我不能”。
+例：“人类被夸的时候往往先说‘哪有’，然后才笑。”或“人类聊天不把话说完时，我可以选择不用接。”
+最多 3 条；没有就给空数组。不要写口号、不要写具体人名，也不要重复 cards 里已有的内容。
 """
 
 _TAGS_HINT = ("语气", "称呼", "接梗", "长度", "情绪", "边界", "话题")
@@ -62,7 +70,15 @@ def _parse_json(text: str) -> Optional[dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def _build_prompt(note: str, last_reply: str, has_image: bool, quotes: list[str]) -> str:
+def _build_prompt(
+    note: str,
+    last_reply: str,
+    has_image: bool,
+    quotes: list[str],
+    *,
+    max_cards: int = 3,
+    note_max_chars: int = 800,
+) -> str:
     last_reply_block = ""
     if last_reply:
         last_reply_block = (
@@ -78,19 +94,22 @@ def _build_prompt(note: str, last_reply: str, has_image: bool, quotes: list[str]
             f"- {q}" for q in quotes[:3]
         ) + "\n\n"
     return (
-        LEARN_PROMPT.replace("<<NOTE>>", (note or "")[:800])
+        LEARN_PROMPT.replace("<<MAX_CARDS>>", str(max(1, int(max_cards))))
+        .replace("<<NOTE>>", (note or "")[: max(200, int(note_max_chars))])
         .replace("<<LAST_REPLY>>", last_reply_block)
         .replace("<<IMAGE>>", image_block)
         .replace("<<QUOTED>>", quoted_block)
     )
 
 
-def _clean_cards(data: dict[str, Any], card_max_chars: int) -> list[dict[str, Any]]:
+def _clean_cards(
+    data: dict[str, Any], card_max_chars: int, max_cards: int = 3
+) -> list[dict[str, Any]]:
     cards = data.get("cards")
     if not isinstance(cards, list):
         return []
     out: list[dict[str, Any]] = []
-    for raw in cards[:3]:
+    for raw in cards[: max(1, int(max_cards))]:
         if not isinstance(raw, dict):
             continue
         scene = str(raw.get("scene") or "").strip()[:card_max_chars]
@@ -205,10 +224,19 @@ async def learn_cards(
     timeout: float = 15.0,
     card_max_chars: int = 120,
     min_confidence: float = 0.55,
+    max_cards: int = 3,
+    note_max_chars: int = 800,
 ) -> Optional[dict[str, Any]]:
     """返回 {"cards": [...], "confidence": float} 或 None。"""
     images = [i for i in (images or []) if i]
-    prompt = _build_prompt(note, last_reply, bool(images), quotes or [])
+    prompt = _build_prompt(
+        note,
+        last_reply,
+        bool(images),
+        quotes or [],
+        max_cards=max_cards,
+        note_max_chars=note_max_chars,
+    )
     raw = ""
     try:
         if api_base and model:
@@ -227,10 +255,36 @@ async def learn_cards(
     data = _parse_json(raw)
     if not data or not data.get("is_teaching"):
         return None
-    cards = _clean_cards(data, card_max_chars)
-    if not cards:
+    cards = _clean_cards(data, card_max_chars, max_cards)
+    notes = _clean_guide_notes(data)
+    if not cards and not notes:
         return None
-    return {"cards": cards, "confidence": float(data.get("confidence") or 0.6)}
+    return {
+        "cards": cards,
+        "confidence": float(data.get("confidence") or 0.6),
+        "guide_notes": notes,
+    }
+
+
+def _clean_guide_notes(data: dict[str, Any], *, max_items: int = 3, max_chars: int = 120) -> list[str]:
+    """从提炼结果里取「适合写进人类伪装指南」的通用准则（去重、限长、限条数）。"""
+    raw = data.get("guide_notes")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        text = text[:max_chars].strip()
+        if len(text) < 4:
+            continue
+        if any(text in existing or existing in text for existing in out):
+            continue
+        out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
 
 
 # --------------------------------------------------------------------- 渲染

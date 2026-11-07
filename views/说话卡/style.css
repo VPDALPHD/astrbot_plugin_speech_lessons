@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "GuideBook";
+  src: url("./font/hanyixiawucha.ttf") format("truetype");
+  font-display: swap;
+  font-weight: normal;
+  font-style: normal;
+}
+
 :root {
   --bg: #f4f6fa;
   --panel: #ffffff;
@@ -208,3 +216,459 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   .list { grid-template-columns: 1fr; }
   .field-row { grid-template-columns: 1fr; }
 }
+
+/* ---------- 设置弹窗（v2.5.1 视觉改版） ---------- */
+.dialog.wide { width: min(820px, 94vw); }
+#cfg-body { display: block; max-height: 64vh; overflow: auto; padding-right: 4px; }
+.cfg-banner {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--panel-2, rgba(127, 127, 127, 0.08));
+  font-size: 12.5px; color: var(--muted);
+}
+.cfg-banner b { color: var(--text); font-weight: 600; }
+.cfg-warn { width: 100%; color: var(--bad); font-size: 12px; margin-top: 4px; }
+
+/* 每个分组一张浅色卡片，标题带色条，和内容拉开层次 */
+.cfg-group {
+  margin-top: 14px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-2);
+}
+.cfg-group-head {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 14px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+.cfg-group-head h3 {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0; font-size: 14.5px; font-weight: 700;
+  color: var(--text); letter-spacing: 0.02em;
+}
+.cfg-group-head h3::before {
+  content: ""; width: 4px; height: 16px; border-radius: 2px;
+  background: var(--accent);
+}
+.cfg-group-count {
+  margin-left: auto; font-size: 11.5px; color: var(--muted);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 9px;
+}
+
+.cfg-grid {
+  display: grid; gap: 14px 16px; align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+}
+.cfg-grid .field { display: grid; gap: 6px; }
+.cfg-grid .field > .f-title {
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.5;
+}
+.cfg-grid .field > .f-title em,
+.cfg-group .field em {
+  font-style: normal; font-weight: 400; font-size: 11.5px;
+  color: var(--muted); line-height: 1.55;
+}
+.cfg-grid .field input.wide { width: 100%; }
+.cfg-grid .field.wide-field { grid-column: 1 / -1; }
+
+/* 统一输入控件观感 */
+.cfg-group input[type="text"],
+.cfg-group input[type="password"],
+.cfg-group input[type="number"],
+.cfg-group select {
+  width: 100%; height: 38px; padding: 0 11px;
+  border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text);
+  font: inherit; font-size: 13px; outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.cfg-group input[type="text"]:focus,
+.cfg-group input[type="password"]:focus,
+.cfg-group input[type="number"]:focus,
+.cfg-group select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* 开关区：所有勾选项集中排在分组末尾，每行一张小卡片 */
+.cfg-switches {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+.cfg-grid + .cfg-switches { margin-top: 14px; }
+.cfg-group .field.switch {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; margin: 0; padding: 11px 13px;
+  border: 1px solid var(--border); border-radius: 11px;
+  background: var(--panel); cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.cfg-group .field.switch:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.field.switch .switch-text { display: flex; flex-direction: column; gap: 2px; }
+.field.switch .switch-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.field.switch .ctl { position: relative; flex: 0 0 auto; width: 40px; height: 22px; }
+.field.switch .ctl input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; opacity: 0; cursor: pointer;
+}
+.field.switch .track {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: var(--border); transition: background 0.18s ease;
+}
+.field.switch .track::after {
+  content: ""; position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s ease;
+}
+.field.switch .ctl input:checked + .track { background: var(--accent); }
+.field.switch .ctl input:checked + .track::after { transform: translateX(18px); }
+.field.switch .ctl input:focus-visible + .track { box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.cfg-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+.field.hidden { display: none; }
+.emb-select { font-size: 13px; }
+/* ---------- 人类伪装指南（v2.5） ---------- */
+.guide-card {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.25));
+  background: var(--panel, #fff);
+}
+.guide-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.guide-head h2 { margin: 0 0 4px; font-size: 15px; }
+.guide-meta { margin: 0; font-size: 12px; color: var(--muted); }
+.guide-view {
+  margin-top: 10px; font-size: 13px; line-height: 1.75;
+  word-break: break-word;
+  max-height: 220px; overflow: auto;
+}
+/* 指南按「节标题 + 编号条目」渲染，让小标题比正文更醒目 */
+.guide-view .guide-section {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.guide-view .guide-section:first-child { margin-top: 0; }
+.guide-view .guide-item { padding-left: 16px; text-indent: -16px; }
+.guide-view .guide-more { color: var(--muted); }
+.guide-view.empty { color: var(--muted); }
+.guide-edit { margin-top: 10px; }
+.guide-edit textarea {
+  width: 100%; min-height: 180px; resize: vertical;
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
+  background: var(--panel-2, rgba(127, 127, 127, 0.05));
+  color: var(--text); font-size: 13px; line-height: 1.7;
+  font-family: inherit;
+}
+.guide-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.guide-actions .hint { flex: 1; }
+.guide-actions-top { display: flex; gap: 8px; align-items: center; }
+#guide-text {
+  font-family: "GuideBook", "Songti SC", serif;
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
+  background: var(--panel-2, rgba(127, 127, 127, 0.05));
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.8;
+  font-family: inherit;
+}
+#guide-text:focus { outline: 2px solid var(--accent-soft, rgba(80, 130, 255, 0.35)); }
+#guide-mask .dialog-body { display: grid; gap: 8px; }
+/* 指南注入滑动开关 */
+.switch-inline { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
+.switch-inline input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-inline .track {
+  position: relative; width: 38px; height: 21px; border-radius: 999px;
+  background: var(--line, rgba(127,127,127,.35)); transition: background .18s ease;
+}
+.switch-inline .track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px;
+  border-radius: 50%; background: #fff; transition: transform .18s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,.25);
+}
+.switch-inline input:checked + .track { background: var(--accent, #4f7cff); }
+.switch-inline input:checked + .track::after { transform: translateX(17px); }
+.switch-inline .switch-text { font-size: 12px; color: var(--muted); }
+
+/* ---------- 日记本（v2.6） ---------- */
+.guide-card .guide-head h2 { font-size: 15px; }
+.journal-dialog { width: min(980px, 96vw); }
+.journal-dialog .dialog-body {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 0;
+  padding: 0;
+  min-height: 420px;
+  max-height: 62vh;
+  overflow: hidden;
+}
+.journal-list {
+  border-right: 1px solid var(--border);
+  overflow: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel-2);
+}
+.journal-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.journal-item:hover { background: var(--panel); border-color: var(--border); }
+.journal-item.on { background: var(--accent-soft); border-color: var(--accent); }
+.journal-day { font-weight: 700; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.journal-chars { justify-self: end; font-size: 11px; color: var(--muted); }
+.journal-head {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.journal-empty { padding: 20px 10px; color: var(--muted); font-size: 12.5px; text-align: center; }
+.journal-read {
+  padding: 16px 18px;
+  overflow: auto;
+  font-size: 13.5px;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.journal-read-day { margin: 0 0 10px; font-size: 13px; font-weight: 700; color: var(--accent); }
+.journal-read-body { white-space: pre-wrap; }
+.journal-read .hint { margin: 14px 0 0; }
+.dialog-foot .ghost.confirm { color: var(--bad); border-color: var(--bad); }
+#guide-day { max-width: 220px; }
+@media (max-width: 720px) {
+  .journal-dialog .dialog-body { grid-template-columns: 1fr; }
+  .journal-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 160px; }
+}
+
+/* ---------- 指南书（v3.0：横线纸 / 按天 / 点外部合上） ---------- */
+.book-wrap { margin: 0 0 16px; display: grid; gap: 12px; }
+.book-stage { padding: 14px 0 6px; cursor: pointer; }
+.book-stage .book { cursor: pointer; }
+.book {
+  position: relative; margin: 0 auto;
+  /* 高度固定：书体高度一旦参与过渡，纸张就会在开合时上下"窜"；
+     宽度也不过渡（会重排文字）。开合只让封面动，纸面一步到位。 */
+  width: 440px; height: 622px;
+  perspective: 2200px;
+}
+.book.open { width: 980px; cursor: default; }
+/* 固定尺寸：窗口窄时横向滚动，不压缩纸张、不改变每页容量 */
+.book-stage { overflow-x: auto; overflow-y: visible; }
+.book.open .book-cover { cursor: default; }
+
+/* 纸面：暖白 + 横线 */
+.book-spread {
+  position: absolute; inset: 0;
+  display: grid; grid-template-columns: 1fr 1fr;
+  border-radius: 12px; border: 1px solid #d8c9a8;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 26px,
+      rgba(150, 120, 70, 0.16) 26px,
+      rgba(150, 120, 70, 0.16) 27px
+    ),
+    linear-gradient(180deg, #fffaf0, #f8efdc);
+  box-shadow: 0 10px 28px rgba(90, 70, 30, 0.18);
+  overflow: hidden; opacity: 0;
+  transition: opacity 0.26s ease;
+}
+.book.open .book-spread { opacity: 1; }
+/* 文字比纸面晚出来：纸先铺开，字再浮上来（否则在浅色纸上先看到黑字） */
+.book-page-head,
+.book-items,
+.book-page-foot { opacity: 0; transition: opacity 0.24s ease; }
+.book.open .book-page-head,
+.book.open .book-items,
+.book.open .book-page-foot { opacity: 1; transition: opacity 0.28s ease 0.18s; }
+.book.closing .book-page-head,
+.book.closing .book-items,
+.book.closing .book-page-foot { opacity: 0; transition: opacity 0.12s ease 0.08s; }
+.book-spread.flip { animation: spreadFlip 0.5s ease; }
+@keyframes spreadFlip {
+  0% { opacity: 1; transform: scaleX(1); }
+  40% { opacity: 0.2; transform: scaleX(0.965); }
+  100% { opacity: 1; transform: scaleX(1); }
+}
+.book-page {
+  display: flex; flex-direction: column;
+  padding: 16px 20px 12px; overflow: auto; position: relative;
+  color: #4b4335;
+}
+.book-page.left { padding-right: 26px; box-shadow: inset -16px 0 20px -18px rgba(90, 70, 30, 0.35); }
+.book-page.right { padding-left: 26px; box-shadow: inset 16px 0 20px -18px rgba(90, 70, 30, 0.35); }
+.book-page.left::after {
+  content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 1px;
+  background: rgba(150, 120, 70, 0.35);
+}
+.book-page-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  color: #8b7a5c; font-size: 12px;
+  border-bottom: 1px solid rgba(150, 120, 70, 0.3);
+  padding-bottom: 7px; margin-bottom: 12px;
+}
+.book-page-no { font-size: 10.5px; color: #b3a58c; letter-spacing: 0.04em; }
+.book-page-day { font-family: "GuideBook", "Songti SC", serif; font-weight: 700; font-size: 14px; color: #6d5a3a; }
+.book-items {
+  margin: 0; padding-left: 18px; display: block;
+  font-family: "GuideBook", "Songti SC", "SimSun", serif;
+  font-size: 14.5px; line-height: 27px;
+}
+.book-items .line { display: flex; align-items: baseline; gap: 6px; overflow-wrap: anywhere; word-break: break-word; }
+.book-items .line.item .num { color: #a07a4c; font-weight: 700; min-width: 22px; }
+.book-items .line.struck { color: #b3a58c; }
+.book-items .line.note {
+  display: block; text-align: right; color: #8a7a5f; padding-right: 6px;
+}
+/* 被划掉的旧条目（[strike]…[/strike]）：留痕但不再注入 */
+.book-items .line s,
+.book-items .line .strike { color: #b3a58c; }
+.book-empty { list-style: none; color: #a3937a; padding-left: 0; }
+.book-page-foot {
+  margin-top: auto; padding-top: 8px;
+  border-top: 1px dashed rgba(150, 120, 70, 0.28);
+  text-align: center; font-size: 11px; color: #9a8a6b; letter-spacing: 0.12em;
+  font-family: inherit;
+}
+
+.book-cover {
+  /* 封面必须是"一本合上的书"的尺寸：固定 440×587、水平居中。
+     不能用 inset:0 —— 那样封面会跟着摊开的书体变成 980 宽的大板子（合书时会露馅）。 */
+  position: absolute; top: 0; left: calc(50% - 220px);
+  width: 440px; height: 587px; z-index: 3; border-radius: 12px;
+  background: linear-gradient(135deg, #2f3b63 0%, #1c2440 60%, #161c31 100%);
+  color: #f3efe4; display: flex; align-items: center; justify-content: center;
+  transform-origin: left center;
+  /* 封面靠背面隐藏来"消失/出现"，不再用透明度渐变：开书时它转到 -180° 完全背对观众，
+     合书时从背面那一下开始转回来，比淡入淡出更像真的把封面翻回来 */
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  transition: transform 0.78s cubic-bezier(0.35, 0.1, 0.2, 1);
+  box-shadow: 0 18px 40px rgba(10, 16, 34, 0.35);
+  cursor: pointer; overflow: hidden;
+}
+.book-cover::before {
+  content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 10px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.12));
+}
+.book-cover:hover { box-shadow: 0 22px 48px rgba(10, 16, 34, 0.45); }
+.book.open .book-cover { transform: rotateY(-180deg); pointer-events: none; }
+
+/* ---------- 合书：书页先收掉，封面从左边转回来盖住（左 → 右） ---------- */
+/* .closing 与 .open 同时存在。封面是固定尺寸且始终居中（书体左右对称伸缩时它的
+   绝对位置不变），所以"书体收窄"这一步观众根本看不见；书页在封面落定前淡掉，
+   避免看到 980 宽的书页从封面两侧往外露。 */
+.book.closing {
+  width: 440px;
+  transition: width 0.42s cubic-bezier(0.4, 0.05, 0.2, 1) 0.5s;
+}
+.book.closing .book-cover {
+  transform: rotateY(0deg);
+  transition: transform 0.55s cubic-bezier(0.33, 0.08, 0.2, 1);
+}
+.book.closing .book-spread { opacity: 0; transition: opacity 0.2s linear 0.28s; }
+.book-cover-inner { text-align: center; display: grid; gap: 10px; padding: 28px 34px; }
+.book-kicker { font-size: 11px; letter-spacing: 0.32em; color: rgba(243, 239, 228, 0.6); }
+.book-title {
+  font-size: 26px; letter-spacing: 0.2em; font-weight: 700;
+  font-family: "Songti SC", "SimSun", serif;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+.book-cover-sub { font-size: 12px; color: rgba(243, 239, 228, 0.65); }
+.book-hint {
+  margin-top: 6px; font-size: 11.5px; color: rgba(243, 239, 228, 0.5);
+  letter-spacing: 0.08em; animation: bookHint 2.4s ease-in-out infinite;
+}
+@keyframes bookHint { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
+.book-ribbon {
+  position: absolute; right: 22px; top: -6px; width: 12px; height: 72px; background: #b4462f;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 82%, 0 100%);
+}
+
+.book-updated {
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.75;
+  letter-spacing: 0.03em;
+  min-height: 14px;
+}
+.book-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.book-indicator { font-size: 12.5px; color: var(--muted); min-width: 48px; text-align: center; }
+.book-sep { width: 1px; height: 18px; background: var(--border); }
+.book-search {
+  flex: 1 1 180px; min-width: 140px; padding: 8px 11px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  font-size: 13px; outline: none;
+}
+.book-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.book-search-hit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.book-search-hit.hidden { display: none; }
+.book-hit {
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  border-radius: 8px; padding: 4px 9px; cursor: pointer; font-size: 12px;
+}
+.book-hit:hover { border-color: var(--accent); color: var(--accent); }
+.book-hit-empty { color: var(--muted); }
+@media (max-width: 720px) {
+  /* 纸张尺寸固定，靠 .book-stage 横向滚动查看，避免容量随窗口变化 */
+  .book { margin-left: 0; }
+}
+
+/* ---------- 确认弹窗（v3.1） ---------- */
+.confirm-dialog { width: min(420px, 92vw); }
+.confirm-dialog .confirm-text {
+  margin: 4px 0; font-size: 14px; line-height: 1.8; color: var(--text);
+}
+
+/* 书页可点击：指针变手 + 边缘淡箭头提示可以翻页 */
+.book-page.left,
+.book-page.right { cursor: pointer; }
+.book-page.left::before,
+.book-page.right::before {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  font-size: 22px; line-height: 1;
+  color: rgba(150, 120, 70, 0.28);
+  opacity: 1; transition: color 0.18s ease, opacity 0.18s ease;
+  pointer-events: none; z-index: 2;
+}
+.book-page.left::before { content: "\2039"; left: 5px; }
+.book-page.right::before { content: "\203A"; right: 5px; }
+.book-page.left:hover::before,
+.book-page.right:hover::before { color: rgba(150, 120, 70, 0.72); }
+/* 正在编辑/不可点击时（合书封面态）不显示 */
+.book:not(.open) .book-page::before { display: none; }
