@@ -76,7 +76,7 @@ CONFIG_FIELDS = [
     {"key": "guide_inject_days", "label": "每轮读最近几天的记录", "type": "int", "default": 2,
      "group": "人类伪装指南", "min": 1, "max": 30,
      "hint": "以「天」为单位：默认读今天和昨天两天的全部记录；一天写多了会占多张纸，不影响读取。"},
-    {"key": "guide_recall_days", "label": "最多翻几天旧记录", "type": "int", "default": 2,
+    {"key": "guide_recall_days", "label": "最多翻几天旧记录", "type": "int", "default": 1,
      "group": "人类伪装指南", "min": 0, "max": 10,
      "hint": "按当前这句话的关键词去旧记录里找，命中就把那一天的全部记录摊开；0 = 不翻旧账。"},
     {"key": "guide_recall_threshold", "label": "旧日记召回相似度阈值", "type": "float", "default": 0.45,
@@ -1007,7 +1007,7 @@ class SpeechLessonsPlugin(Star):
         exclude = {int(p["id"]) for p in recent}
         try:
             recall_limit = int(
-                self._cfg("guide_recall_days", self._cfg("guide_recall_pages", 2)) or 0
+                self._cfg("guide_recall_days", self._cfg("guide_recall_pages", 1)) or 0
             )
         except (TypeError, ValueError):
             recall_limit = 2
@@ -1065,7 +1065,7 @@ class SpeechLessonsPlugin(Star):
         """按当前消息的语义，从旧页里挑出最相关的几页（"想起"）。"""
         try:
             limit = int(
-                self._cfg("guide_recall_days", self._cfg("guide_recall_pages", 2)) or 0
+                self._cfg("guide_recall_days", self._cfg("guide_recall_pages", 1)) or 0
             )
         except (TypeError, ValueError):
             limit = 2
@@ -2261,7 +2261,7 @@ class SpeechLessonsPlugin(Star):
             "limit": self._journal_budget(),
             "enabled": self._journal_enabled(),
             "inject_days": int(self._cfg("guide_inject_days", self._cfg("guide_inject_pages", 2)) or 2),
-            "recall_days": int(self._cfg("guide_recall_days", self._cfg("guide_recall_pages", 2)) or 0),
+            "recall_days": int(self._cfg("guide_recall_days", self._cfg("guide_recall_pages", 1)) or 0),
         }
 
     async def page_get_journal(self):

@@ -197,12 +197,6 @@
     "default": 2,
     "hint": "以「天」为单位：默认读今天和昨天的全部记录；一天写多了会占多张纸，不影响读取。"
   },
-  "guide_recall_pages": {
-    "description": "按关键词最多翻几页旧页",
-    "type": "int",
-    "default": 2,
-    "hint": "按当前这句话的语义去旧页里找相关的，找到才注入；0 = 不回忆。"
-  },
   "guide_recall_threshold": {
     "description": "语义兜底召回相似度阈值",
     "type": "float",
@@ -250,5 +244,11 @@
     "type": "int",
     "default": 21,
     "hint": "每天到这个整点后写一页今天；0=凌晨，23=晚上11点。"
+  },
+  "guide_recall_days": {
+    "description": "按关键词最多翻几天的旧记录",
+    "type": "int",
+    "default": 1,
+    "hint": "以「天」为单位：默认最近 2 天 + 按关键词再翻 1 天；0 = 不回忆。"
   }
 }
