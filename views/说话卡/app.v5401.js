@@ -692,10 +692,25 @@ function countItems(list) {
   return (list || []).filter((entry) => entry.kind !== "note").length;
 }
 
+// 后端给的是结构化行（带 tag）；老数据没有 rows 时退回解析 content 快照
+function pageItems(page) {
+  const rows = page && Array.isArray(page.rows) ? page.rows : null;
+  if (rows && rows.length) {
+    return rows
+      .map((row) => ({
+        kind: String(row.kind || "item"),
+        text: String(row.text || ""),
+        tag: String(row.tag || ""),
+      }))
+      .filter((row) => row.text);
+  }
+  return parseLines((page && page.content) || "");
+}
+
 function buildSheets() {
   const sheets = [];
   for (const page of bookState.pages) {
-    const items = parseLines(page.content || "");
+    const items = pageItems(page);
     if (!items.length) {
       sheets.push({ day: page.day, cont: 0, pageId: page.id, left: [], right: [] });
       continue;
@@ -738,6 +753,7 @@ async function loadBook() {
       ? `共 ${pages.length} 天 · ${bookState.sheets.length} 张`
       : "还没写过";
     const stats = (data && data.stats) || {};
+    bookState.scope = String((data && data.scope) || "all");
     if (pages.length) {
       const recall = bookState.recallDays
         ? ` + 按关键词翻 ${bookState.recallDays} 天的旧记录`
@@ -911,36 +927,36 @@ async function showSheet(index, animate = false, direction = 1) {
   }
 }
 
-// 把当前左页克隆到封面背面：封面翻到左边时看到的就是真正的那一页
+// 封面背面印第一页：把左页当前内容抄到封面的背面去
 function syncCoverBack() {
-  const src = document.querySelector(".book-spread > .book-page.left");
-  const back = $("cover-back");
-  if (!back) return;
+  const back = document.querySelector(".book-cover .cover-face.back");
+  const left = document.querySelector(".book-page.left");
+  if (!back || !left) return;
+  back.innerHTML = "";
   const page = document.createElement("div");
   page.className = "book-page left";
-  page.innerHTML = src ? src.innerHTML : "";
-  back.replaceChildren(page);
+  page.innerHTML = left.innerHTML;
+  back.appendChild(page);
 }
 
 function openBook() {
   if (bookState.open) return;
+  syncCoverBack();
   bookState.open = true;
+  $("book").classList.add("open");
   if (!bookState.sheets.length) renderEmptySheet();
   else showSheet(bookState.sheet);
-  syncCoverBack();
-  $("book").classList.add("open");
 }
 
 function closeBook() {
   if (!bookState.open) return;
   bookState.open = false;
-  syncCoverBack();
   $("book").classList.add("closing");
   $("book").classList.remove("open");
   clearTimeout(bookState.closeTimer);
   bookState.closeTimer = setTimeout(() => {
     $("book").classList.remove("closing");
-  }, 800);
+  }, 900);
 }
 
 async function stepSheet(dir) {

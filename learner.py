@@ -235,6 +235,7 @@ async def learn_cards(
     min_confidence: float = 0.55,
     max_cards: int = 3,
     note_max_chars: int = 800,
+    guide_scope: str = "all",
 ) -> Optional[dict[str, Any]]:
     """返回 {"cards": [...], "confidence": float} 或 None。"""
     images = [i for i in (images or []) if i]
@@ -245,6 +246,7 @@ async def learn_cards(
         quotes or [],
         max_cards=max_cards,
         note_max_chars=note_max_chars,
+        guide_scope=guide_scope,
     )
     raw = ""
     try:

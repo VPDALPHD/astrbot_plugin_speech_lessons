@@ -195,7 +195,19 @@
     "description": "每轮读最近几天的记录",
     "type": "int",
     "default": 2,
-    "hint": "以「天」为单位：默认读今天和昨天的全部记录；一天写多了会占多张纸，不影响读取。"
+    "hint": "按「页」取最近 N 页（一页=一天）。中间几天没聊，最近两页就是更早的日子。"
+  },
+  "guide_day_cut_hour": {
+    "description": "几点算新的一天",
+    "type": "int",
+    "default": 4,
+    "hint": "默认 4 点：凌晨 4 点前说的还算昨天。不想要日界线就填 0。"
+  },
+  "guide_material_group": {
+    "description": "把群聊也当观察素材",
+    "type": "bool",
+    "default": true,
+    "hint": "关掉后只从私聊素材里提炼，群里别人的话不会进本子。"
   },
   "guide_recall_threshold": {
     "description": "语义兜底召回相似度阈值",
@@ -259,6 +271,6 @@
       "all",
       "interaction"
     ],
-    "hint": "all=所有（日常琐碎也记）；interaction=仅互动（只记人际互动与人际交流）"
+    "hint": "所有=全都注入；仅互动=只注入人际互动/交流的条目。条目照旧存着并带标签，切回来就恢复，随时可逆。"
   }
 }

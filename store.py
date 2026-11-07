@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS journal_items (
     kind             TEXT    NOT NULL DEFAULT 'item',
     seq              INTEGER NOT NULL DEFAULT 0,
     text             TEXT    NOT NULL DEFAULT '',
+    tag              TEXT    NOT NULL DEFAULT '',
     created_at       REAL    NOT NULL,
     updated_at       REAL    NOT NULL,
     hit_count        INTEGER NOT NULL DEFAULT 0,
@@ -95,6 +96,12 @@ CREATE TABLE IF NOT EXISTS journal_items (
 );
 CREATE INDEX IF NOT EXISTS idx_journal_items_page ON journal_items(page_id, seq);
 """
+
+# 条目标签：只用于「按记录程度过滤注入」，不影响存储与展示。
+#   interaction = 人际互动 / 人际交流（怎么跟人说话、怎么回应、怎么相处）
+#   task        = 事务性内容（测试、调试、工具操作、报错、文件、日程…）
+#   ''          = 老数据 / 没判断出来的，两种模式下都算可见（宁可多给，不要少给）
+ITEM_TAGS = ("", "interaction", "task")
 
 MIN_EF = 1.3
 MAX_INTERVAL_DAYS = 120.0
@@ -149,9 +156,28 @@ class CardStore:
         self._conn.execute("PRAGMA journal_mode=WAL;")
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate_columns_locked()
             self._conn.commit()
             self._archive_legacy()
         self.journal_migrate_from_guide()
+
+    def _migrate_columns_locked(self) -> None:
+        """老库补列（幂等）：v2.5.2 起 journal_items 带 tag。"""
+        try:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(journal_items)")}
+            if cols and "tag" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE journal_items ADD COLUMN tag TEXT NOT NULL DEFAULT ''"
+                )
+                logger.info("[speech_lessons] 指南书条目表已补 tag 列")
+        except sqlite3.Error as exc:
+            logger.warning("[speech_lessons] 补 tag 列失败: %s", exc)
+
+    @staticmethod
+    def norm_tag(tag: str) -> str:
+        """规范标签：只认 interaction / task，其余一律当「没标」。"""
+        body = str(tag or "").strip().lower()
+        return body if body in ITEM_TAGS else ""
 
     def _archive_legacy(self) -> None:
         """v1.0.0 的 lessons 表整表归档：那些正则抽出来的句子不可用。"""
@@ -780,6 +806,9 @@ class CardStore:
             self._conn.execute(
                 "DELETE FROM journal_vectors WHERE page_id=?", (int(page_id),)
             )
+            self._conn.execute(
+                "DELETE FROM journal_items WHERE page_id=?", (int(page_id),)
+            )
             self._conn.commit()
             return bool(cur.rowcount)
 
@@ -877,6 +906,18 @@ class CardStore:
                 out[int(row["page_id"])] = vec
         return out
 
+    def journal_vector_meta(self, model: str = "") -> dict[int, float]:
+        """每页向量最后一次算出来的时间（用来判断向量是否比页面还旧）。"""
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT page_id, updated_at FROM journal_vectors WHERE model=?",
+                    (str(model or ""),),
+                ).fetchall()
+        except sqlite3.Error:
+            return {}
+        return {int(r["page_id"]): float(r["updated_at"] or 0) for r in rows}
+
     def journal_vector_count(self, model: str = "") -> int:
         try:
             with self._lock:
@@ -904,6 +945,7 @@ class CardStore:
                 "kind": str(r["kind"] or "item"),
                 "seq": int(r["seq"] or 0),
                 "text": str(r["text"] or ""),
+                "tag": self.norm_tag(r["tag"]),
                 "hit_count": int(r["hit_count"] or 0),
             }
             for r in rows
@@ -929,13 +971,27 @@ class CardStore:
                 if not text:
                     continue
                 self._conn.execute(
-                    "INSERT INTO journal_items (page_id, day, kind, seq, text, created_at, updated_at)"
-                    " VALUES (?,?,?,?,?,?,?)",
-                    (int(page_id), str(day or ""), kind, index, text, now, now),
+                    "INSERT INTO journal_items"
+                    " (page_id, day, kind, seq, text, tag, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        int(page_id),
+                        str(day or ""),
+                        kind,
+                        index,
+                        text,
+                        self.norm_tag(item.get("tag")),
+                        now,
+                        now,
+                    ),
                 )
             self._conn.execute(
                 "UPDATE journal_pages SET content=?, updated_at=? WHERE id=?",
                 (str(snapshot or ""), now, int(page_id)),
+            )
+            # 内容变了，旧向量就是过期的：删掉，召回时会按新内容懒重算
+            self._conn.execute(
+                "DELETE FROM journal_vectors WHERE page_id=?", (int(page_id),)
             )
             self._conn.commit()
 
@@ -953,10 +1009,16 @@ class CardStore:
             "kind": str(row["kind"] or "item"),
             "seq": int(row["seq"] or 0),
             "text": str(row["text"] or ""),
+            "tag": self.norm_tag(row["tag"]),
         }
 
     def journal_update_item(
-        self, item_id: int, *, text: str | None = None, kind: str | None = None
+        self,
+        item_id: int,
+        *,
+        text: str | None = None,
+        kind: str | None = None,
+        tag: str | None = None,
     ) -> bool:
         sets: list[str] = []
         params: list[Any] = []
@@ -966,6 +1028,9 @@ class CardStore:
         if kind is not None:
             sets.append("kind=?")
             params.append(str(kind))
+        if tag is not None:
+            sets.append("tag=?")
+            params.append(self.norm_tag(tag))
         if not sets:
             return False
         sets.append("updated_at=?")
@@ -988,7 +1053,13 @@ class CardStore:
             return bool(cur.rowcount)
 
     def journal_insert_item(
-        self, page_id: int, day: str, after_seq: int, kind: str, text: str
+        self,
+        page_id: int,
+        day: str,
+        after_seq: int,
+        kind: str,
+        text: str,
+        tag: str = "",
     ) -> int:
         """在某行之后插入一行（after_seq=0 表示插到最前面）。"""
         now = time.time()
@@ -1001,20 +1072,54 @@ class CardStore:
                 (int(page_id), int(after_seq)),
             )
             cur = self._conn.execute(
-                "INSERT INTO journal_items (page_id, day, kind, seq, text, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO journal_items"
+                " (page_id, day, kind, seq, text, tag, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
                 (
                     int(page_id),
                     str(day or ""),
                     str(kind or "item"),
                     int(after_seq) + 1,
                     body,
+                    self.norm_tag(tag),
                     now,
                     now,
                 ),
             )
             self._conn.commit()
             return int(cur.lastrowid or 0)
+
+    def journal_untagged_items(self, limit: int = 5000) -> list[dict]:
+        """还没打标签的条目（升级后一次性补标用）。"""
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT id, text, kind FROM journal_items"
+                    " WHERE tag='' LIMIT ?",
+                    (max(1, int(limit)),),
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+        return [
+            {"id": int(r["id"]), "text": str(r["text"] or ""), "kind": str(r["kind"] or "item")}
+            for r in rows
+        ]
+
+    def journal_tag_stats(self) -> dict:
+        """条目按标签计数：面板顶部用。"""
+        out = {"interaction": 0, "task": 0, "untagged": 0}
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT tag, COUNT(*) AS n FROM journal_items GROUP BY tag"
+                ).fetchall()
+        except sqlite3.Error:
+            return out
+        for row in rows:
+            tag = self.norm_tag(row["tag"])
+            key = tag or "untagged"
+            out[key] = out.get(key, 0) + int(row["n"] or 0)
+        return out
 
     def journal_touch_items(self, ids: Iterable[int]) -> None:
         ids = [int(i) for i in ids if i]

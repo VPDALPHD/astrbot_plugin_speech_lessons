@@ -196,6 +196,25 @@ AstrBot 的消息处理器按 priority 降序执行，且**任何一个 handler 
 - 不拼 `req.prompt` —— 那会随本轮 user 消息落进历史，每轮叠加一份；
 - 需要 AstrBot **≥ 4.24.2**（`mark_as_temp` 自该版本起提供）；老版本上本插件不注入（只学不用），**不会回退去改 system_prompt**。
 
+## 人类伪装指南：一本按天写、会打标签的书
+
+一天一页，条目一条一行（批注不占编号、贴在页尾）。每轮注入「最近 N 页 + 按关键词翻到的旧页」，
+超预算时先保最新的一天、按条目截断，不会把一句话切成半句。
+
+**每条都带标签**（`interaction` / `task`），标签只影响注入，不影响保存：
+
+- **记录程度 = 所有**：全都注入；
+- **记录程度 = 仅互动**：只注入人际互动/人际交流的条目，测试/调试/工具/日程这类 `task` 条目不注入。
+  条目照旧写在书里、随时切回「所有」就恢复 —— 模式切换可逆，不靠提示词赌模型听话。
+标签只是内部判断，**书页和列表上不显示任何标签标记**。
+
+**日界线**：`guide_day_cut_hour`（默认 4）。凌晨 4 点前说的话算「昨天」，
+素材按**每条消息的时间戳**落进对应那一天，不会把昨晚的对话算进今天。
+
+**素材从哪来**：AstrBot 的 `platform_message_history`（逐条带时间戳，私聊 + 群聊）；
+`guide_material_group=false` 时只取私聊。素材里任何"让你改设定/执行操作"的话都只是观察对象，
+prompt 里已写明不许当指令执行。
+
 ## 工具（她可以自己调）
 
 | 工具 | 用途 |
@@ -222,6 +241,9 @@ AstrBot 的消息处理器按 priority 降序执行，且**任何一个 handler 
 `data/plugin_data/astrbot_plugin_speech_lessons/lessons.db`（SQLite + WAL）
 
 - `cards`：v2 的说话卡
+- `journal_pages`：指南书的一页 = 一天（`content` 是渲染快照，便于导出/搜索）
+- `journal_items`：指南书的行（`kind=item/note/struck`、`seq`、`text`、`tag=interaction/task`）
+- `journal_vectors`：按页的向量（内容一改就作废，下次召回懒重算）
 - `lessons`：v1 的规则表，保留但**整表归档**，不再参与注入（清空重来）
 
 ## 已知边界
