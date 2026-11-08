@@ -2706,11 +2706,18 @@ class SpeechLessonsPlugin(Star):
             return error_response(f"读取失败：{exc}", status_code=500)
 
     async def page_get_journal_page(self):
-        """读取某一页日记的全文；不带 page_id 就取最近一页。"""
+        """读取某一页日记的全文。
+
+        参数：page_id（页 id）或 day（YYYY-MM-DD，面板编辑弹窗换日期时用）；
+        都不带就取最近一页。
+        """
         raw_id = str(request.query.get("page_id", "") or "").strip()
+        raw_day = str(request.query.get("day", "") or "").strip()[:10]
         try:
             if raw_id:
                 page = self.store.journal_page(int(raw_id))
+            elif raw_day and len(raw_day) == 10:
+                page = self.store.journal_page_by_day(raw_day)
             else:
                 recent = self.store.journal_recent(limit=1)
                 page = recent[-1] if recent else None

@@ -1015,17 +1015,62 @@ async function searchBook() {
   }
 }
 
-function openPageEditor(page) {
+// 编辑弹窗当前载入的是哪一天、当时原文是什么（用来判断有没有未保存改动）
+const editorState = { day: "", text: "" };
+
+function paintEditor(day, page) {
   bookState.editing = page || null;
-  $("guide-dlg-title").textContent = page && page.day
-    ? `编辑 ${page.day}`
-    : "编辑今天";
-  $("guide-day").value = (page && page.day) || todayStr();
-  $("guide-text").value = page ? page.content || "" : "";
-  $("guide-err").textContent = "";
+  editorState.day = day;
+  editorState.text = page ? page.content || "" : "";
+  $("guide-day").value = day;
+  $("guide-dlg-title").textContent = page ? `编辑 ${day}` : `写 ${day}`;
+  $("guide-text").value = editorState.text;
+  $("guide-err").textContent = page ? "" : "这一天还没写过，保存会新建这一页。";
   updateGuideCount();
+}
+
+// 换到某一天：优先用已加载的页；书里没有就按日期问后端（超过 200 页时列表里可能没有）
+async function applyDayToEditor(day) {
+  let page = bookState.pages.find((p) => p.day === day) || null;
+  if (!page) {
+    try {
+      const data = await bridge.apiGet("journal/page", { day });
+      page = (data && data.page) || null;
+    } catch (error) {
+      page = null;
+    }
+  }
+  if (editorState.day !== day) return; // 期间又换了一天，放弃这次绘制
+  paintEditor(day, page);
+}
+
+async function openPageEditor(page) {
+  const day = (page && page.day) || todayStr();
+  editorState.day = day; // 占位，避免第一次 await 被当成"又换了一天"
+  paintEditor(day, page || null);
+  $("guide-err").textContent = "";
   $("guide-mask").classList.remove("hidden");
   setTimeout(() => $("guide-text").focus(), 30);
+  if (!page) await applyDayToEditor(day);
+}
+
+// 在弹窗里换日期 → 立刻把那天已有的内容读出来（别让人在 A 天的内容上选 B 天再保存）
+function bindGuideDayPicker() {
+  const input = $("guide-day");
+  if (!input || input.dataset.bound === "1") return;
+  input.dataset.bound = "1";
+  input.addEventListener("change", () => {
+    const day = input.value || todayStr();
+    const current = String($("guide-text").value || "");
+    if (current !== editorState.text && current.trim()) {
+      input.value = editorState.day; // 回退日期，避免静默丢掉未保存的改动
+      $("guide-err").textContent = "当前有未保存的修改，先保存再切换日期。";
+      return;
+    }
+    editorState.day = day;
+    editorState.text = current;
+    applyDayToEditor(day);
+  });
 }
 
 function closeGuideEditor() {
@@ -1149,6 +1194,7 @@ async function main() {
     const page = currentPage();
     openPageEditor(page || null);
   });
+  bindGuideDayPicker();
   $("book-review").addEventListener("click", askWriteToday);
   $("confirm-ok").addEventListener("click", runConfirm);
   $("confirm-cancel").addEventListener("click", closeConfirm);
