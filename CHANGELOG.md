@@ -3,6 +3,51 @@
 > 完整迭代记录。本文件同时显示在 AstrBot 面板「插件详情 → 更新日志」。
 > 作者：VPDALPHD，DS_CHAN ｜ 许可证：MIT
 
+## v2.5.3（2026-11-08）
+
+这一版把指南书的**读写都下沉到「条目」粒度**：查笔记只返回命中的那几条，改笔记只动那一行，
+序号 / 快照 / 向量在同一事务里维护。
+
+### 新增：按条目查笔记（不再摊开整页）
+
+- 新增 `journal_search_items()`：`note_human_guide` 查重时只返回命中的条目 + 所属日期，
+  不再把命中日期的**整页笔记**丢给模型 —— 省 token，也少了无关内容干扰。
+- 条目命中不足 `limit` 时再用语义召回补足（结果按 `setdefault` 合并，不再互相覆盖）。
+
+### 新增：行级写库（事务化）
+
+- 新增 `store.journal_mutate_items(page_id, action=insert/update/strike/delete, ...)`：
+  - 插入后**重排序号**（插在中间也能保持 1..n 连续）；
+  - 删除后**把后面的序号补位**，不再留下空洞；
+  - 同一次操作里同步 `journal_pages.content` 快照、`updated_at`，并清掉过期向量；
+  - 全程 `BEGIN IMMEDIATE`，任何一步失败整体回滚，不会留下"行改了但快照没改"的半截状态。
+- `set_line` / `strike_line` / `insert_after` / `delete_line` 四个工具动作改走这条通道，
+  不再"整页删光再重建"。目标行已被别处改掉时返回明确提示，让模型重新读页。
+
+### 修复
+
+- **快照换行写成了字面量 `\n`**：`journal_sync_page_items` 里 `"\\n".join(...)` 会让
+  `journal_pages.content` 塌成一整行（面板「编辑」再保存会把整天并成 1 条）。已修正。
+- **补回被误删的存储方法**：`journal_replace_items` / `journal_items_count` / `journal_update_item`
+  / `journal_item` / `journal_delete_item` / `journal_insert_item` 在上一轮重构里被删，
+  但 `main.py` 仍在调用（写今天 / 整页重写 / 启动迁移 / 老条目补标签），
+  已从 2.5.2 发布版逐字补回 —— 否则**一重载就无法写书**。
+- `journal_mutate_items` 的 `update` 传空 `tag` 时改为**保留原标签**（只改错别字不再把标签清掉）。
+
+### 重构
+
+- 快照渲染统一为 `store.render_items_snapshot()`：存储层写快照、插件层渲染注入文本都调它，
+  `main._render_items` 改为委托 —— 消除"两份编号规则各自演化"的隐患。
+- 新增索引 `idx_journal_items_day(day, kind, seq)`（按天取条目）。
+- 旧页仍可读写：没有结构化行的页在首次读取时自动迁移成条目。
+
+### 升级注意
+
+- 重载插件即可生效，数据库无需手动迁移（`tag` 列与索引都是幂等的 `IF NOT EXISTS`/启动补列）。
+- 回滚到 2.5.2 也安全：多出来的列/索引对旧代码无影响。
+- 自测：`tests/test_v252.py` 扩到 95 项（新增行级增删改一整组：序号连续、快照真换行、
+  批注不编号、划线占号、删除补位、改不存在行返回 False、更新保留标签）。
+
 ## v2.5.2（2026-11-08）
 
 这一版是「指南书」从提示词层下沉到数据层的一次重构：条目开始带标签，记录程度改成

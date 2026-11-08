@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS journal_items (
     last_hit_at      REAL    NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_journal_items_page ON journal_items(page_id, seq);
+CREATE INDEX IF NOT EXISTS idx_journal_items_day ON journal_items(day, kind, seq);
 """
 
 # 条目标签：只用于「按记录程度过滤注入」，不影响存储与展示。
@@ -112,6 +113,31 @@ def norm_key(text: str) -> str:
     """归一化取指纹：去空白标点，用于去重与相似判定。"""
     cleaned = "".join(ch for ch in (text or "") if ch not in _PUNCT).strip()
     return cleaned
+
+
+def render_items_snapshot(items: Iterable[dict]) -> str:
+    """一页的行 → 文本快照（唯一实现）。
+
+    规则：条目顺序编号；批注（note）不编号；划掉的（struck）占号并包 [strike]。
+    存储层写快照、插件层渲染注入文本都走这里，避免两份逻辑漂移
+    （历史教训：store 里手抄一份，把 "\\n" 写成了字面量，快照塌成一行）。
+    """
+    out: list[str] = []
+    n = 0
+    for item in items or []:
+        kind = str(item.get("kind") or "item")
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if kind == "struck":
+            n += 1
+            out.append(f"{n}. [strike]{text}[/strike]")
+        elif kind == "note":
+            out.append(text)
+        else:
+            n += 1
+            out.append(f"{n}. {text}")
+    return "\n".join(out)
 
 
 def card_fp(scene: str, bad: str, good: str) -> str:
@@ -951,6 +977,112 @@ class CardStore:
             for r in rows
         ]
 
+    def journal_search_items(self, keyword: str, limit: int = 20) -> list[dict]:
+        """按条目检索指南，返回命中的条目及所属日期；不会加载整页正文。"""
+        word = str(keyword or "").strip()
+        if not word:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT i.*, p.id AS owner_page_id FROM journal_items i "
+                "JOIN journal_pages p ON p.id=i.page_id "
+                "WHERE i.text LIKE ? AND i.kind!='struck' "
+                "ORDER BY p.day DESC, i.seq ASC LIMIT ?",
+                (f"%{word}%", max(1, int(limit))),
+            ).fetchall()
+        return [{"id": int(r["id"]), "page_id": int(r["owner_page_id"]),
+                 "day": str(r["day"] or ""), "kind": str(r["kind"] or "item"),
+                 "seq": int(r["seq"] or 0), "text": str(r["text"] or ""),
+                 "tag": self.norm_tag(r["tag"])} for r in rows]
+
+    def journal_mutate_items(
+        self, page_id: int, day: str, *, action: str, item_id: int = 0,
+        after_seq: int = 0, text: str = "", kind: str = "item", tag: str = "",
+    ) -> bool:
+        """原子地增删改条目，并规范序号、同步页快照、清除过期向量。"""
+        now = time.time()
+        body = str(text or "").strip()
+        if action in {"insert", "update"} and not body:
+            return False
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                if action == "insert":
+                    seq = self._conn.execute(
+                        "SELECT COALESCE(MAX(seq),0) FROM journal_items WHERE page_id=?",
+                        (int(page_id),),
+                    ).fetchone()[0]
+                    after = max(0, min(int(after_seq), int(seq)))
+                    self._conn.execute(
+                        "UPDATE journal_items SET seq=seq+1,updated_at=? WHERE page_id=? AND seq>?",
+                        (now, int(page_id), after),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO journal_items (page_id,day,kind,seq,text,tag,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                        (int(page_id), str(day), kind if kind in ("item", "note") else "item",
+                         after + 1, body, self.norm_tag(tag), now, now),
+                    )
+                elif action == "update":
+                    # 不传 tag（空串）= 保留原标签，避免"只改错别字"把标签清掉
+                    new_tag = self.norm_tag(tag)
+                    if new_tag:
+                        cur = self._conn.execute(
+                            "UPDATE journal_items SET text=?,tag=?,updated_at=? WHERE id=? AND page_id=?",
+                            (body, new_tag, now, int(item_id), int(page_id)),
+                        )
+                    else:
+                        cur = self._conn.execute(
+                            "UPDATE journal_items SET text=?,updated_at=? WHERE id=? AND page_id=?",
+                            (body, now, int(item_id), int(page_id)),
+                        )
+                    if not cur.rowcount:
+                        self._conn.rollback()
+                        return False
+                elif action == "strike":
+                    cur = self._conn.execute(
+                        "UPDATE journal_items SET kind='struck',updated_at=? WHERE id=? AND page_id=?",
+                        (now, int(item_id), int(page_id)),
+                    )
+                    if not cur.rowcount:
+                        self._conn.rollback()
+                        return False
+                elif action == "delete":
+                    row = self._conn.execute(
+                        "SELECT seq FROM journal_items WHERE id=? AND page_id=?",
+                        (int(item_id), int(page_id)),
+                    ).fetchone()
+                    if not row:
+                        self._conn.rollback()
+                        return False
+                    self._conn.execute("DELETE FROM journal_items WHERE id=?", (int(item_id),))
+                    self._conn.execute(
+                        "UPDATE journal_items SET seq=seq-1,updated_at=? WHERE page_id=? AND seq>?",
+                        (now, int(page_id), int(row["seq"])),
+                    )
+                else:
+                    self._conn.rollback()
+                    return False
+                rows = self._conn.execute(
+                    "SELECT kind,text FROM journal_items WHERE page_id=? ORDER BY seq,id",
+                    (int(page_id),),
+                ).fetchall()
+                snapshot = render_items_snapshot(
+                    [
+                        {"kind": row["kind"], "text": row["text"]}
+                        for row in rows
+                    ]
+                )
+                self._conn.execute(
+                    "UPDATE journal_pages SET content=?,updated_at=? WHERE id=?",
+                    (snapshot, now, int(page_id)),
+                )
+                self._conn.execute("DELETE FROM journal_vectors WHERE page_id=?", (int(page_id),))
+                self._conn.commit()
+                return True
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def journal_items_count(self) -> int:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM journal_items").fetchone()
@@ -1138,3 +1270,4 @@ class CardStore:
             self._conn.close()
         except Exception:
             pass
+

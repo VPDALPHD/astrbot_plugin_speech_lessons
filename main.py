@@ -36,7 +36,7 @@ except Exception:  # noqa: BLE001 - 老版本没有这套 API 时，插件其余
 from . import judge as judge_mod
 from . import learner as learner_mod
 from .embedding import EmbeddingService, cosine
-from .store import CardStore, norm_key
+from .store import CardStore, norm_key, render_items_snapshot
 
 PLUGIN_NAME = "astrbot_plugin_speech_lessons"
 # 说话卡以「临时用户内容片段」注入本轮请求：只发给模型、不写会话历史，
@@ -1340,23 +1340,12 @@ class SpeechLessonsPlugin(Star):
         ]
 
     def _render_items(self, items: list[dict]) -> str:
-        """行 → 文本快照：条目编号、批注原样、划线包 [strike]。"""
-        out: list[str] = []
-        n = 0
-        for item in items:
-            kind = str(item.get("kind") or "item")
-            text = str(item.get("text") or "").strip()
-            if not text:
-                continue
-            if kind == "struck":
-                n += 1
-                out.append(f"{n}. [strike]{text}[/strike]")
-            elif kind == "note":
-                out.append(text)
-            else:
-                n += 1
-                out.append(f"{n}. {text}")
-        return "\n".join(out)
+        """行 → 文本快照：条目编号、批注原样、划线包 [strike]。
+
+        实现在 store.render_items_snapshot（存储层写快照和这里共用同一份，
+        避免编号规则出现两份实现）。
+        """
+        return render_items_snapshot(items)
 
     def _save_items(self, page_id: int, day: str, items: list[dict]) -> str:
         """把行写回库并刷新 content 快照，返回快照文本。"""
@@ -3060,46 +3049,35 @@ class SpeechLessonsPlugin(Star):
             pass
 
     async def _similar_pages(self, text: str, *, limit: int = 3) -> list[dict]:
-        """以「日期」为单位找写过类似内容的那几页（划掉的不算）。"""
+        """按条目找相关笔记，仅返回命中条目，不把整页内容交给模型。"""
         query = str(text or "").strip()
         if not query:
             return []
         found: dict[int, dict] = {}
         for word in self._keywords_from_text(query):
-            for page in self._book_search(word, limit=8):
-                found[int(page["id"])] = page
-        try:
-            if self.embed.enabled:
+            try:
+                for item in self.store.journal_search_items(word, limit=max(5, limit * 3)):
+                    found[int(item["id"])] = item
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[speech_lessons] 条目检索失败: %s", exc)
+        if len(found) < max(1, limit) and self.embed.enabled:
+            try:
                 vec = await self.embed.embed(query)
                 if vec:
                     threshold = float(self._cfg("guide_similar_threshold", 0.8) or 0.8)
-                    table = await self._journal_vectors()
-                    for pid, other in table.items():
+                    for pid, other in (await self._journal_vectors()).items():
                         if cosine(vec, other) < threshold:
                             continue
                         page = self.store.journal_page(int(pid))
-                        if page:
-                            found[int(pid)] = page
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[speech_lessons] 相似页检索失败: %s", exc)
-        pages_all = self._book_pages_all()
-        out: list[dict] = []
-        for page in sorted(
-            found.values(), key=lambda p: str(p.get("day") or ""), reverse=True
-        ):
-            items = self._visible_items(self._split_items(str(page.get("content") or "")))
-            if not items:
-                continue
-            out.append(
-                {
-                    **page,
-                    "label": str(page.get("day") or "?"),
-                    "items": items,
-                }
-            )
-            if len(out) >= limit:
-                break
-        return out
+                        if not page:
+                            continue
+                        for item in self._page_items(page):
+                            if item.get("kind") != "struck":
+                                found.setdefault(int(item["id"]), {**item, "day": page["day"]})
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[speech_lessons] 相似条目检索失败: %s", exc)
+        ordered = sorted(found.values(), key=lambda x: (str(x.get("day") or ""), -int(x.get("seq") or 0)), reverse=True)
+        return [{"label": item.get("day") or "?", "items": [item["text"]]} for item in ordered[:max(1, limit)]]
 
     @filter.llm_tool(name="note_human_guide")
     async def note_human_guide_tool(
@@ -3135,7 +3113,7 @@ class SpeechLessonsPlugin(Star):
         pages = await self._similar_pages(text)
         if not pages:
             return "书里没有写过类似的。确认是新观察，就用 mode=write 写进今天这一页。"
-        lines = [f"写过类似内容的 {len(pages)} 天（整天的全部记录）："]
+        lines = [f"找到 {len(pages)} 条相关笔记："]
         for page in pages:
             lines.append(f"〔{page['label']}〕")
             for item in page["items"]:
@@ -3221,7 +3199,12 @@ class SpeechLessonsPlugin(Star):
             return pages_all[-1]
 
         def _items(page: dict) -> list[dict]:
-            return self._page_items(page)
+            rows = self._page_items(page)
+            # 兼容尚未迁移的旧页：首次读取时结构化落库，此后按条目读取/编辑。
+            if rows and not self.store.journal_items(int(page["id"])):
+                self._save_items(int(page["id"]), str(page.get("day") or ""), rows)
+                rows = self.store.journal_items(int(page["id"]))
+            return rows
 
         def _listing(page: dict) -> str:
             rows = _items(page)
@@ -3294,16 +3277,14 @@ class SpeechLessonsPlugin(Star):
             if act == "insert_after":
                 if not text:
                     return "insert_after 需要 content。"
-                pos = max(0, min(line_no, len(rows)))
                 item_kind = "note" if str(kind).lower() == "note" else "item"
-                rows.insert(
-                    pos,
-                    {
-                        "kind": item_kind,
-                        "text": text,
-                        "tag": self.store.norm_tag(tag) or self._infer_item_tag(text),
-                    },
-                )
+                after_seq = rows[max(0, min(line_no, len(rows))) - 1]["seq"] if line_no > 0 and rows else 0
+                if not self.store.journal_mutate_items(
+                    int(page["id"]), str(page["day"]), action="insert",
+                    after_seq=int(after_seq), kind=item_kind, text=text,
+                    tag=self.store.norm_tag(tag) or self._infer_item_tag(text),
+                ):
+                    return "插入失败，请重试。"
             else:
                 if line_no <= 0:
                     return "需要 line（行号，从 1 开始）。"
@@ -3313,25 +3294,24 @@ class SpeechLessonsPlugin(Star):
                 if act == "set_line":
                     if not text:
                         return "set_line 需要 content。"
-                    rows[idx] = {
-                        "kind": rows[idx]["kind"],
-                        "text": text,
-                        "tag": self.store.norm_tag(tag)
-                        or self.store.norm_tag(rows[idx].get("tag"))
-                        or self._infer_item_tag(text),
-                    }
+                    changed = self.store.journal_mutate_items(
+                        int(page["id"]), str(page["day"]), action="update",
+                        item_id=int(rows[idx]["id"]), text=text,
+                        tag=self.store.norm_tag(tag) or self.store.norm_tag(rows[idx].get("tag")) or self._infer_item_tag(text),
+                    )
                 elif act == "strike_line":
-                    rows[idx] = {
-                        "kind": "struck",
-                        "text": rows[idx]["text"],
-                        "tag": rows[idx].get("tag", ""),
-                    }
+                    changed = self.store.journal_mutate_items(
+                        int(page["id"]), str(page["day"]), action="strike", item_id=int(rows[idx]["id"])
+                    )
                 else:
-                    rows.pop(idx)
-            snapshot = self._save_items(int(page["id"]), str(page["day"]), rows)
+                    changed = self.store.journal_mutate_items(
+                        int(page["id"]), str(page["day"]), action="delete", item_id=int(rows[idx]["id"])
+                    )
+                if act != "insert_after" and not changed:
+                    return "目标条目已变化，未能完成操作；请重新读取该页后再试。"
             await self._journal_after_write(int(page["id"]))
             logger.info("[speech_lessons] %s：%s 第 %s 行", act, page["day"], line_no)
-            return f"已处理 {page['day']}（现在 {len(self._parse_lines(snapshot))} 行）。"
+            return f"已处理 {page['day']}（现在 {len(self.store.journal_items(int(page['id'])))} 行）。"
 
         if act in {"save", "write", "replace"}:
             # 整页重写是主人的权限：只有面板上亲手点「重写今日」才会整页覆盖。
