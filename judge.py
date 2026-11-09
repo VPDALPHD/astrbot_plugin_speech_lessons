@@ -48,7 +48,7 @@ NEGATIVE_FEEDBACK = (
 _CMD_PREFIX = ("/", "!", "。")
 
 # 引号包裹的原文，v2 只用来给模型"提示重点"，不做抽取
-_QUOTE_RE = re.compile(r"[「“\"']([^」”\"']{1,200})[」”\"']")
+_QUOTE_RE = re.compile(r"[「『“\"']([^」』”\"']{1,200})[」』”\"']")
 
 
 def _norm(text: str) -> str:

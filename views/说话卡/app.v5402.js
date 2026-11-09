@@ -8,6 +8,12 @@ const state = {
   status: "active",
   keyword: "",
   items: [],
+  page: 1,
+  pageSize: 9,
+  total: 0,
+  sort: "time",
+  direction: "desc",
+  requestId: 0,
   editing: null,
   pendingDelete: 0,
   pendingTimer: null,
@@ -43,25 +49,52 @@ function parseTags(raw) {
 }
 
 /* ------------------------------------------------------------ 数据 */
-async function load() {
-  listEl.innerHTML = '<div class="empty">加载中…</div>';
+async function load({ scroll = false } = {}) {
+  const requestId = ++state.requestId;
+  listEl.setAttribute("aria-busy", "true");
+  $("card-prev").disabled = true;
+  $("card-next").disabled = true;
   try {
     const data = await bridge.apiGet("cards", {
       status: state.status,
       q: state.keyword,
-      limit: 300,
+      limit: state.pageSize,
+      page: state.page,
+      sort: state.sort,
+      direction: state.direction,
     });
-    state.items = (data && data.items) || [];
-    renderStats((data && data.stats) || {});
+    if (requestId !== state.requestId) return;
+    state.items = data.items || [];
+    state.total = data.total ?? state.items.length;
+    state.page = data.page || 1;
+    renderStats(data.stats || {});
     renderList();
+    renderPagination();
+    if (scroll) $("cards-title").scrollIntoView({ block: "start" });
   } catch (error) {
+    if (requestId !== state.requestId) return;
     listEl.innerHTML = "";
     const box = document.createElement("div");
     box.className = "empty";
     box.textContent = "读取失败：" + (error && error.message ? error.message : error);
     listEl.appendChild(box);
+    $("card-range").textContent = "";
+    $("card-page").textContent = "—";
     toast("读取失败", true);
+  } finally {
+    if (requestId === state.requestId) listEl.setAttribute("aria-busy", "false");
   }
+}
+
+function renderPagination() {
+  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  const start = (state.page - 1) * state.pageSize;
+  $("card-range").textContent = state.total
+    ? `${start + 1}–${start + state.items.length} / 共 ${state.total} 张`
+    : "共 0 张";
+  $("card-page").textContent = `${state.page} / ${pages}`;
+  $("card-prev").disabled = state.page <= 1;
+  $("card-next").disabled = state.page >= pages;
 }
 
 function renderStats(stats) {
@@ -1273,9 +1306,57 @@ async function main() {
     
   });
 
+  const sizeKey = "speech-lessons.card-page-size";
+  const sizeInput = $("card-page-size");
+  try {
+    const savedSize = localStorage.getItem(sizeKey);
+    if (Array.from(sizeInput.options).some((option) => option.value === savedSize)) {
+      sizeInput.value = savedSize;
+      state.pageSize = Number(savedSize);
+    }
+  } catch {
+    // The embedded view may have storage disabled.
+  }
+  sizeInput.addEventListener("change", () => {
+    state.pageSize = Number(sizeInput.value);
+    state.page = 1;
+    try {
+      localStorage.setItem(sizeKey, sizeInput.value);
+    } catch {
+      // Keep the selected size for the current view.
+    }
+    load();
+  });
+  $("card-sort").addEventListener("change", (event) => {
+    state.sort = event.target.value;
+    state.page = 1;
+    load();
+  });
+  $("card-sort-direction").addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    state.direction = state.direction === "asc" ? "desc" : "asc";
+    state.page = 1;
+    button.dataset.direction = state.direction;
+    button.title = state.direction === "asc" ? "当前正序，点击切换倒序" : "当前倒序，点击切换正序";
+    button.setAttribute("aria-label", button.title);
+    load();
+  });
+  $("card-prev").addEventListener("click", () => {
+    state.page -= 1;
+    load({ scroll: true });
+  });
+  $("card-next").addEventListener("click", () => {
+    state.page += 1;
+    load({ scroll: true });
+  });
+
   let searchTimer = null;
   $("q").addEventListener("input", (event) => {
     state.keyword = event.target.value.trim();
+    state.page = 1;
+    state.requestId += 1;
+    $("card-prev").disabled = true;
+    $("card-next").disabled = true;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(load, 220);
   });
@@ -1286,6 +1367,8 @@ async function main() {
     for (const b of $("seg").querySelectorAll("button")) b.classList.remove("on");
     btn.classList.add("on");
     state.status = btn.dataset.status;
+    state.page = 1;
+    clearTimeout(searchTimer);
     load();
   });
 

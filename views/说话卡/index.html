@@ -6,7 +6,7 @@
     <meta http-equiv="pragma" content="no-cache" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>说话卡面板</title>
-    <link rel="stylesheet" href="./style.css?v=4.6.3" />
+    <link rel="stylesheet" href="./style.css?v=4.6.4" />
   </head>
   <body>
     <header class="top">
@@ -17,17 +17,6 @@
       <p class="sub">私聊里教它一次，这里就会多一张卡；下面的改动下一轮对话立刻生效。</p>
       <div class="stats" id="stats"></div>
     </header>
-
-    <section class="toolbar">
-      <input id="q" class="search" type="search" placeholder="搜索 场景 / 反例 / 正例 / 要点" />
-      <div class="seg" id="seg" role="tablist">
-        <button data-status="active" class="on">生效中</button>
-        <button data-status="archived">已归档</button>
-        <button data-status="all">全部</button>
-      </div>
-      <button id="new-btn" class="primary">＋ 新建卡片</button>
-      <button id="cfg-btn" class="ghost" title="插件设置">⚙ 设置</button>
-    </section>
 
     <section class="book-wrap" id="book-card">
       <div class="book-stage" id="book-stage">
@@ -84,10 +73,54 @@
       <div id="book-search-hit" class="book-search-hit hidden"></div>
     </section>
 
-    <div class="divider-grad" aria-hidden="true"></div>
-
-    <main id="list" class="list">
-      <div class="empty">加载中…</div>
+    <main class="card-section" aria-labelledby="cards-title">
+      <h2 class="section-rule" id="cards-title">说话卡</h2>
+      <div class="toolbar">
+        <input id="q" class="search" type="search" placeholder="搜索 场景 / 反例 / 正例 / 要点" />
+        <div class="seg" id="seg" role="tablist">
+          <button data-status="active" class="on">生效中</button>
+          <button data-status="archived">已归档</button>
+          <button data-status="all">全部</button>
+        </div>
+        <div class="card-sort">
+          <select id="card-sort" aria-label="说话卡排序方式">
+            <option value="time">按时间顺序</option>
+            <option value="uses">按注入次数顺序</option>
+          </select>
+          <button id="card-sort-direction" class="ghost sort-direction" type="button"
+            data-direction="desc" aria-label="当前倒序，点击切换正序" title="当前倒序，点击切换正序">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path class="sort-up" d="M5 12V3M2.5 5.5 5 3l2.5 2.5" />
+              <path class="sort-down" d="M11 4v9m-2.5-2.5L11 13l2.5-2.5" />
+            </svg>
+          </button>
+        </div>
+        <button id="new-btn" class="primary">＋ 新建卡片</button>
+        <button id="cfg-btn" class="ghost" title="插件设置">⚙ 设置</button>
+      </div>
+      <div id="list" class="list" aria-busy="true">
+        <div class="empty">加载中…</div>
+      </div>
+      <nav class="card-pagination" aria-label="说话卡分页">
+        <span id="card-range" class="card-range" aria-live="polite"></span>
+        <div class="card-page-buttons">
+          <button id="card-prev" class="ghost" type="button" aria-label="上一页" title="上一页" disabled>‹</button>
+          <span id="card-page" class="card-page-number" aria-live="polite">—</span>
+          <button id="card-next" class="ghost" type="button" aria-label="下一页" title="下一页" disabled>›</button>
+        </div>
+        <label class="card-page-size">
+          每页
+          <select id="card-page-size" aria-label="每页卡片数量">
+            <option value="6">6</option>
+            <option value="9" selected>9</option>
+            <option value="12">12</option>
+            <option value="18">18</option>
+            <option value="24">24</option>
+            <option value="36">36</option>
+          </select>
+          张
+        </label>
+      </nav>
     </main>
 
     <div id="mask" class="mask hidden">
@@ -194,6 +227,6 @@
       </div>
     </div>
 
-    <script type="module" src="./app.v5402.js"></script>
+    <script type="module" src="./app.v5402.js?v=5403"></script>
   </body>
 </html>

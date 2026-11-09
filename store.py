@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS cards (
     created_at       REAL    NOT NULL,
     updated_at       REAL    NOT NULL,
     last_used_at     REAL    NOT NULL DEFAULT 0,
+    decay_settled_at REAL    NOT NULL DEFAULT 0,
     use_count        INTEGER NOT NULL DEFAULT 0,
     review_reps      INTEGER NOT NULL DEFAULT 0,
     review_ef        REAL    NOT NULL DEFAULT 2.5,
@@ -73,6 +74,10 @@ CREATE TABLE IF NOT EXISTS journal_pages (
     updated_at       REAL    NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_journal_day ON journal_pages(day);
+CREATE TABLE IF NOT EXISTS journal_interaction_labels (
+    text             TEXT PRIMARY KEY,
+    is_interaction   INTEGER NOT NULL CHECK (is_interaction IN (0, 1))
+);
 CREATE TABLE IF NOT EXISTS journal_vectors (
     page_id          INTEGER PRIMARY KEY,
     model            TEXT    NOT NULL DEFAULT '',
@@ -188,7 +193,13 @@ class CardStore:
         self.journal_migrate_from_guide()
 
     def _migrate_columns_locked(self) -> None:
-        """老库补列（幂等）：v2.5.2 起 journal_items 带 tag。"""
+        """Add missing columns to existing databases."""
+        card_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(cards)")}
+        if "decay_settled_at" not in card_cols:
+            self._conn.execute(
+                "ALTER TABLE cards ADD COLUMN decay_settled_at REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.execute("UPDATE cards SET decay_settled_at=?", (time.time(),))
         try:
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(journal_items)")}
             if cols and "tag" not in cols:
@@ -240,45 +251,77 @@ class CardStore:
         embedding: list[float] | None = None,
         embedding_model: str = "",
         similar_threshold: float = 0.0,
+        max_active: int | None = None,
+        correction: tuple[int, str] | None = None,
     ) -> tuple[int, bool]:
         """新增一张卡。返回 (id, 是否新建)。同指纹的旧卡只加强权重。
 
-        ``embedding`` + ``similar_threshold`` 一起给时，先用向量余弦找近似卡：
-        相似度 ≥ 阈值就当成同一张（只升权重、补要点），否则才新建。
+        语义近似且正反例一致时强化旧卡。明确纠正时校验旧正例后替换。
+        容量限制只在真正新建时检查。
         """
         if not good and not bad:
             return 0, False
         now = time.time()
         fp = card_fp(scene, bad, good)
         tag_json = json.dumps(list(tags or []), ensure_ascii=False)
-        with self._lock:
-            # ① 指纹命中（字面完全相同）
-            row = self._conn.execute(
-                "SELECT id, weight, principle FROM cards WHERE card_fp=? AND status='active' "
-                "ORDER BY id DESC LIMIT 1",
-                (fp,),
-            ).fetchone()
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = None
+            if correction is not None:
+                target_id, expected_good = correction
+                row = self._conn.execute(
+                    "SELECT id, weight, principle, scene, bad, good FROM cards "
+                    "WHERE id=? AND good=? AND status='active'",
+                    (target_id, expected_good),
+                ).fetchone()
+            correcting = row is not None
+            if row is None:
+                row = self._conn.execute(
+                    "SELECT id, weight, principle, scene, bad, good FROM cards "
+                    "WHERE card_fp=? AND status='active' ORDER BY id DESC LIMIT 1",
+                    (fp,),
+                ).fetchone()
             if row is None and embedding and similar_threshold > 0:
-                # ② 语义近似
-                near = self._find_similar_locked(
-                    embedding, embedding_model, similar_threshold
-                )
+                near = self._find_similar_locked(embedding, embedding_model, similar_threshold)
                 if near is not None:
-                    row = self._conn.execute(
-                        "SELECT id, weight, principle FROM cards WHERE id=?",
+                    candidate = self._conn.execute(
+                        "SELECT id, weight, principle, scene, bad, good FROM cards WHERE id=?",
                         (near[0],),
                     ).fetchone()
+                    if candidate and (
+                        norm_key(candidate["good"]) == norm_key(good)
+                        and norm_key(candidate["bad"]) == norm_key(bad)
+                    ):
+                        row = candidate
             if row:
-                new_weight = min(3.0, float(row["weight"]) + 0.4)
-                # 同一张卡又教一遍：原则可以更新成更准的说法
+                card_id = int(row["id"])
                 principle_text = (principle or str(row["principle"] or "")).strip()
-                self._conn.execute(
-                    "UPDATE cards SET weight=?, principle=?, confidence=?, updated_at=?,"
-                    " last_used_at=?, feedback_up=feedback_up+1 WHERE id=?",
-                    (new_weight, principle_text, confidence, now, now, row["id"]),
-                )
-                self._conn.commit()
-                return int(row["id"]), False
+                if correcting:
+                    self._conn.execute(
+                        "UPDATE cards SET scene=?, bad=?, good=?, principle=?, tags=?, "
+                        "confidence=?, raw_text=?, card_fp=?, updated_at=?, last_used_at=? WHERE id=?",
+                        (scene, bad, good, principle_text, tag_json, confidence, raw_text,
+                         fp, now, now, card_id),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE cards SET weight=?, principle=?, confidence=?, updated_at=?, "
+                        "last_used_at=?, feedback_up=feedback_up+1 WHERE id=?",
+                        (min(3.0, float(row["weight"]) + 0.4), principle_text,
+                         confidence, now, now, card_id),
+                    )
+                vector_matches = correcting or (row["scene"], row["good"]) == (scene, good)
+                if embedding and vector_matches and principle_text == principle:
+                    self._save_vector_locked(card_id, embedding, embedding_model, now)
+                elif correcting or principle_text != row["principle"]:
+                    self._conn.execute("DELETE FROM card_vectors WHERE card_id=?", (card_id,))
+                return card_id, False
+            if max_active is not None:
+                active = self._conn.execute(
+                    "SELECT COUNT(*) FROM cards WHERE status='active'"
+                ).fetchone()[0]
+                if active >= max_active:
+                    return 0, False
             cur = self._conn.execute(
                 "INSERT INTO cards (scene, bad, good, principle, tags, confidence, source,"
                 " weight, status, created_at, updated_at, last_used_at, card_fp, raw_text)"
@@ -302,7 +345,6 @@ class CardStore:
             new_id = int(cur.lastrowid or 0)
             if new_id and embedding:
                 self._save_vector_locked(new_id, embedding, embedding_model, now)
-            self._conn.commit()
             return new_id, True
 
     # ------------------------------------------------------------------ 向量
@@ -443,25 +485,37 @@ class CardStore:
     # ------------------------------------------------------- 面板用：查询/改
     _EDITABLE = ("scene", "bad", "good", "principle", "tags", "weight", "status")
 
-    def query(self, status: str = "active", keyword: str = "", limit: int = 300) -> list[dict]:
-        """面板列卡。status=active/archived/all，keyword 模糊搜所有文本字段。"""
-        sql = "SELECT * FROM cards WHERE 1=1"
+    def query(
+        self, status: str = "active", keyword: str = "", limit: int = 300, *,
+        page: int = 1, sort: str = "", ascending: bool = False,
+    ) -> tuple[list[dict], int, int]:
+        """Return a sorted page, the matching count, and the clamped page number."""
+        where = " FROM cards WHERE 1=1"
         args: list[Any] = []
         if status in ("active", "archived"):
-            sql += " AND status=?"
+            where += " AND status=?"
             args.append(status)
         if keyword:
             like = f"%{keyword}%"
-            sql += (
+            where += (
                 " AND (scene LIKE ? OR bad LIKE ? OR good LIKE ? OR principle LIKE ?"
                 " OR tags LIKE ?)"
             )
             args.extend([like] * 5)
-        sql += " ORDER BY (status='active') DESC, weight DESC, id DESC LIMIT ?"
-        args.append(int(limit))
+        column = {"time": "created_at", "uses": "use_count"}.get(sort)
+        direction = "ASC" if ascending else "DESC"
+        if column:
+            order = f"{column} {direction}, id {direction}"
+        else:
+            order = "(status='active') DESC, weight DESC, id DESC"
         with self._lock:
-            rows = self._conn.execute(sql, args).fetchall()
-            return [self._to_dict(r) for r in rows]
+            total = int(self._conn.execute("SELECT COUNT(*)" + where, args).fetchone()[0])
+            page = max(1, min(page, (total + limit - 1) // limit))
+            rows = self._conn.execute(
+                "SELECT *" + where + f" ORDER BY {order} LIMIT ? OFFSET ?",
+                [*args, limit, (page - 1) * limit],
+            ).fetchall()
+            return [self._to_dict(row) for row in rows], total, page
 
     @staticmethod
     def _to_dict(row: sqlite3.Row) -> dict:
@@ -529,8 +583,8 @@ class CardStore:
     def restore(self, card_id: int) -> bool:
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE cards SET status='active', updated_at=? WHERE id=?",
-                (time.time(), card_id),
+                "UPDATE cards SET status='active', decay_settled_at=?, updated_at=? WHERE id=?",
+                (time.time(), time.time(), card_id),
             )
             self._conn.commit()
             return bool(cur.rowcount)
@@ -584,7 +638,7 @@ class CardStore:
         with self._lock:
             for i in [int(x) for x in ids if x]:
                 row = self._conn.execute(
-                    "SELECT review_reps, review_ef, review_interval, weight FROM cards WHERE id=?",
+                    "SELECT review_reps, review_ef, review_interval, weight FROM cards WHERE id=? AND status='active'",
                     (i,),
                 ).fetchone()
                 if not row:
@@ -625,34 +679,28 @@ class CardStore:
         return changed
 
     def apply_idle_decay(self, per_day: float, archive_weight: float) -> int:
-        """闲置衰减兜底：按天折权重，跌破阈值归档。返回归档条数。"""
+        """Settle only newly elapsed idle time after the first 24 hours."""
         now = time.time()
         archived = 0
-        with self._lock:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
             rows = self._conn.execute(
-                "SELECT id, weight, last_used_at, next_review_at FROM cards "
+                "SELECT id, weight, last_used_at, created_at, decay_settled_at FROM cards "
                 "WHERE status='active'"
             ).fetchall()
             for row in rows:
-                last = float(row["last_used_at"] or row["next_review_at"] or 0)
-                if last <= 0:
+                last = float(row["last_used_at"] or row["created_at"])
+                start = max(last + 86400.0, float(row["decay_settled_at"]))
+                if now <= start:
                     continue
-                idle_days = max(0.0, (now - last) / 86400.0)
-                if idle_days < 1.0:
-                    continue
-                weight = float(row["weight"] or 0.0) - per_day * idle_days
-                if weight <= archive_weight:
-                    self._conn.execute(
-                        "UPDATE cards SET status='archived', weight=?, updated_at=? WHERE id=?",
-                        (max(0.0, weight), now, row["id"]),
-                    )
-                    archived += 1
-                else:
-                    self._conn.execute(
-                        "UPDATE cards SET weight=?, updated_at=? WHERE id=?",
-                        (weight, now, row["id"]),
-                    )
-            self._conn.commit()
+                elapsed_days = (now - start) / 86400.0
+                weight = max(0.0, float(row["weight"]) - max(0.0, per_day) * elapsed_days)
+                status = "archived" if per_day > 0 and weight <= archive_weight else "active"
+                self._conn.execute(
+                    "UPDATE cards SET status=?, weight=?, decay_settled_at=?, updated_at=? WHERE id=?",
+                    (status, weight, now, now, row["id"]),
+                )
+                archived += status == "archived"
         return archived
 
     def archive(self, card_id: int) -> bool:
@@ -960,7 +1008,9 @@ class CardStore:
         """取某一页的行（按 seq 升序）：kind=item/note/struck。"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM journal_items WHERE page_id=? ORDER BY seq ASC, id ASC",
+                "SELECT i.*, c.is_interaction FROM journal_items i "
+                "LEFT JOIN journal_interaction_labels c ON c.text=i.text "
+                "WHERE i.page_id=? ORDER BY i.seq ASC, i.id ASC",
                 (int(page_id),),
             ).fetchall()
         return [
@@ -971,29 +1021,30 @@ class CardStore:
                 "kind": str(r["kind"] or "item"),
                 "seq": int(r["seq"] or 0),
                 "text": str(r["text"] or ""),
-                "tag": self.norm_tag(r["tag"]),
+                "tag": "interaction" if r["is_interaction"] == 1 else "",
                 "hit_count": int(r["hit_count"] or 0),
             }
             for r in rows
         ]
 
-    def journal_search_items(self, keyword: str, limit: int = 20) -> list[dict]:
+    def journal_search_items(self, keyword: str, limit: int = 20, *, interaction_only: bool = False) -> list[dict]:
         """按条目检索指南，返回命中的条目及所属日期；不会加载整页正文。"""
         word = str(keyword or "").strip()
         if not word:
             return []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT i.*, p.id AS owner_page_id FROM journal_items i "
+                "SELECT i.*, p.id AS owner_page_id, c.is_interaction FROM journal_items i "
                 "JOIN journal_pages p ON p.id=i.page_id "
-                "WHERE i.text LIKE ? AND i.kind!='struck' "
+                "LEFT JOIN journal_interaction_labels c ON c.text=i.text "
+                "WHERE i.text LIKE ? AND i.kind='item' AND (?=0 OR c.is_interaction=1) "
                 "ORDER BY p.day DESC, i.seq ASC LIMIT ?",
-                (f"%{word}%", max(1, int(limit))),
+                (f"%{word}%", int(interaction_only), max(1, int(limit))),
             ).fetchall()
         return [{"id": int(r["id"]), "page_id": int(r["owner_page_id"]),
                  "day": str(r["day"] or ""), "kind": str(r["kind"] or "item"),
                  "seq": int(r["seq"] or 0), "text": str(r["text"] or ""),
-                 "tag": self.norm_tag(r["tag"])} for r in rows]
+                 "tag": "interaction" if r["is_interaction"] == 1 else ""} for r in rows]
 
     def journal_mutate_items(
         self, page_id: int, day: str, *, action: str, item_id: int = 0,
@@ -1221,37 +1272,39 @@ class CardStore:
             self._conn.commit()
             return int(cur.lastrowid or 0)
 
-    def journal_untagged_items(self, limit: int = 5000) -> list[dict]:
-        """还没打标签的条目（升级后一次性补标用）。"""
-        try:
-            with self._lock:
-                rows = self._conn.execute(
-                    "SELECT id, text, kind FROM journal_items"
-                    " WHERE tag='' LIMIT ?",
-                    (max(1, int(limit)),),
-                ).fetchall()
-        except sqlite3.Error:
-            return []
-        return [
-            {"id": int(r["id"]), "text": str(r["text"] or ""), "kind": str(r["kind"] or "item")}
-            for r in rows
-        ]
+    def journal_unclassified_texts(self, limit: int = 32) -> list[str]:
+        """Return the latest unique texts awaiting independent classification."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT i.text FROM journal_items i "
+                "LEFT JOIN journal_interaction_labels c ON c.text=i.text "
+                "WHERE i.kind!='struck' AND c.text IS NULL "
+                "GROUP BY i.text ORDER BY MAX(i.id) DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [str(row["text"]) for row in rows]
+
+    def journal_save_interaction_labels(self, labels: list[tuple[str, bool]]) -> None:
+        """Persist positive and negative decisions, keyed by the exact text."""
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO journal_interaction_labels(text, is_interaction) VALUES (?, ?)",
+                labels,
+            )
+            self._conn.executemany(
+                "DELETE FROM journal_vectors WHERE model LIKE '%:journal-items-v3:interaction' "
+                "AND page_id IN (SELECT page_id FROM journal_items WHERE text=?)",
+                [(text,) for text, interaction in labels if interaction],
+            )
 
     def journal_tag_stats(self) -> dict:
-        """条目按标签计数：面板顶部用。"""
-        out = {"interaction": 0, "task": 0, "untagged": 0}
-        try:
-            with self._lock:
-                rows = self._conn.execute(
-                    "SELECT tag, COUNT(*) AS n FROM journal_items GROUP BY tag"
-                ).fetchall()
-        except sqlite3.Error:
-            return out
-        for row in rows:
-            tag = self.norm_tag(row["tag"])
-            key = tag or "untagged"
-            out[key] = out.get(key, 0) + int(row["n"] or 0)
-        return out
+        """Count current rows using the independent classification."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total, COUNT(CASE WHEN c.is_interaction=1 THEN 1 END) AS tagged "
+                "FROM journal_items i LEFT JOIN journal_interaction_labels c ON c.text=i.text"
+            ).fetchone()
+        return {"interaction": row["tagged"], "untagged": row["total"] - row["tagged"]}
 
     def journal_touch_items(self, ids: Iterable[int]) -> None:
         ids = [int(i) for i in ids if i]
