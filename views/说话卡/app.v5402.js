@@ -638,7 +638,8 @@ const bookState = {
   limit: 8000,
   injectDays: 2,
   recallDays: 2,
-  flipTimer: null,
+  flip: null,
+  requestedSheet: null,
   closeTimer: null,
   confirmAction: null,
 };
@@ -859,122 +860,143 @@ function fillPage(side, items, sheet, pageNo, startNo) {
 }
 
 function renderEmptySheet() {
+  clearFlip();
+  bookState.sheet = 0;
+  bookState.pageId = null;
   fillPage("left", [], null, 0);
   fillPage("right", [], null, 0);
   $("book-indicator").textContent = "—";
 }
 
-// 真实翻纸：右页那张纸绕书脊翻到左边（背面就是新的左页），反向同理
-function playFlip({ forward, front, back, onMid }) {
-  const spreadEl = document.querySelector(".book-spread");
-  if (!spreadEl) return;
-  const sheet = document.createElement("div");
-  sheet.className = "flip-sheet " + (forward ? "fwd" : "back");
-
-  const makeFace = (html, side, extra) => {
-    const face = document.createElement("div");
-    face.className = "flip-face" + (extra ? " " + extra : "");
-    const page = document.createElement("div");
-    page.className = "book-page " + side;
-    page.innerHTML = html;
-    face.appendChild(page);
-    return face;
-  };
-
-  sheet.appendChild(makeFace(front, forward ? "right" : "left", ""));
-  sheet.appendChild(makeFace(back, forward ? "left" : "right", "back"));
-  spreadEl.appendChild(sheet);
-  void sheet.offsetWidth;
-  sheet.classList.add("run");
-
-  clearTimeout(bookState.flipTimer);
-  const midTimer = setTimeout(() => {
-    if (typeof onMid === "function") onMid();
-  }, 300);
-  bookState.flipTimer = setTimeout(() => {
-    clearTimeout(midTimer);
-    sheet.remove();
-  }, 720);
+function clearFlip() {
+  const flip = bookState.flip;
+  bookState.flip = null;
+  bookState.requestedSheet = null;
+  if (!flip) return;
+  flip.layer.remove();
+  for (const animation of flip.animations) animation.cancel();
 }
 
-async function showSheet(index, animate = false, direction = 1) {
-  if (!bookState.sheets.length) {
+function applySheet(index) {
+  const sheet = bookState.sheets[index];
+  bookState.sheet = index;
+  bookState.pageId = sheet.pageId;
+  fillPage("left", sheet.left, sheet, index * 2 + 1, sheet.startNo);
+  fillPage(
+    "right",
+    sheet.right,
+    sheet,
+    index * 2 + 2,
+    (sheet.startNo || 0) + countItems(sheet.left),
+  );
+  $("book-indicator").textContent = `${sheet.day}（${sheet.cont * 2 + 1}–${sheet.cont * 2 + 2}）`;
+}
+
+function showSheet(index, animate = false) {
+  const total = bookState.sheets.length;
+  if (!total) {
     renderEmptySheet();
     return;
   }
-  const total = bookState.sheets.length;
-  const i = Math.max(0, Math.min(index, total - 1));
-  const sheet = bookState.sheets[i];
-
-  const leftEl = document.querySelector(".book-page.left");
-  const rightEl = document.querySelector(".book-page.right");
-  const snapshot =
-    animate && leftEl && rightEl
-      ? { left: leftEl.innerHTML, right: rightEl.innerHTML }
-      : null;
-
-  const apply = () => {
-    bookState.sheet = i;
-    bookState.pageId = sheet.pageId;
-    fillPage("left", sheet.left, sheet, i * 2 + 1, sheet.startNo);
-    fillPage(
-      "right",
-      sheet.right,
-      sheet,
-      i * 2 + 2,
-      (sheet.startNo || 0) + countItems(sheet.left),
-    );
-    $("book-indicator").textContent = `${sheet.day}（${sheet.cont * 2 + 1}–${sheet.cont * 2 + 2}）`;
-  };
-
-  if (!snapshot) {
-    apply();
+  const target = Math.max(0, Math.min(index, total - 1));
+  const spread = $("book-spread");
+  if (!animate || !bookState.open || matchMedia("(prefers-reduced-motion: reduce)").matches ||
+      typeof spread.animate !== "function") {
+    clearFlip();
+    applySheet(target);
     return;
   }
-
-  apply();
-  const freshLeft = leftEl.innerHTML;
-  const freshRight = rightEl.innerHTML;
-
-  if (direction > 0) {
-    // 下一张：旧右页翻到左边，背面 = 新左页；旧左页先留着，纸掠过 90° 时再换
-    leftEl.innerHTML = snapshot.left;
-    playFlip({
-      forward: true,
-      front: snapshot.right,
-      back: freshLeft,
-      onMid: () => {
-        leftEl.innerHTML = freshLeft;
-      },
-    });
-  } else {
-    // 上一张：旧左页翻到右边，背面 = 新右页
-    rightEl.innerHTML = snapshot.right;
-    playFlip({
-      forward: false,
-      front: snapshot.left,
-      back: freshRight,
-      onMid: () => {
-        rightEl.innerHTML = freshRight;
-      },
-    });
+  if (bookState.flip) {
+    bookState.requestedSheet = target;
+    return;
   }
+  if (target === bookState.sheet) return;
+
+  const forward = target > bookState.sheet;
+  const left = spread.querySelector(":scope > .book-page.left");
+  const right = spread.querySelector(":scope > .book-page.right");
+  const source = forward ? right : left;
+  const destination = forward ? left : right;
+  const oldDestination = destination.innerHTML;
+  const front = source.cloneNode(true);
+  applySheet(target);
+  const back = destination.cloneNode(true);
+  destination.innerHTML = oldDestination;
+
+  const layer = document.createElement("div");
+  layer.className = `flip-sheet ${forward ? "fwd" : "backward"}`;
+  layer.setAttribute("aria-hidden", "true");
+  const count = 12;
+  const pageWidth = spread.clientWidth / 2;
+  const stripWidth = pageWidth / count;
+  const side = forward ? 1 : -1;
+  const frames = Array.from({ length: count }, () => []);
+  // Adjacent strips share a hinge. A changing bend makes the edge lead the spine.
+  for (let frame = 0; frame <= 24; frame += 1) {
+    const progress = frame / 24;
+    let x = 0;
+    let z = 0;
+    for (let strip = 0; strip < count; strip += 1) {
+      const turn = Math.PI * progress + Math.sin(Math.PI * progress) * 0.86 *
+        ((strip + 0.5) / count - 0.38);
+      frames[strip].push({
+        transform: `translate3d(${x}px, 0, ${z}px) rotateY(${-side * turn}rad)`,
+      });
+      x += side * stripWidth * Math.cos(turn);
+      z += stripWidth * Math.sin(turn);
+    }
+  }
+
+  const face = (page, index, reverse = false) => {
+    const panel = document.createElement("div");
+    panel.className = reverse ? "flip-face reverse" : "flip-face";
+    const copy = page.cloneNode(true);
+    copy.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
+    copy.style.width = `${pageWidth}px`;
+    copy.style.left = `${-index * stripWidth}px`;
+    panel.append(copy);
+    return panel;
+  };
+  const strips = frames.map((_, i) => {
+    const strip = document.createElement("div");
+    strip.className = "flip-strip";
+    strip.style.width = `${stripWidth + 0.45}px`;
+    const index = forward ? i : count - 1 - i;
+    strip.append(face(front, index), face(back, count - 1 - index, true));
+    layer.append(strip);
+    return strip;
+  });
+  spread.append(layer);
+  const options = { duration: 680, easing: "cubic-bezier(.42, .05, .24, 1)", fill: "both" };
+  const animations = strips.map((strip, i) => strip.animate(frames[i], options));
+  const flip = { layer, animations };
+  bookState.flip = flip;
+  Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
+    if (bookState.flip !== flip) return;
+    const next = bookState.requestedSheet;
+    clearFlip();
+    applySheet(target);
+    if (next !== null && next !== target && bookState.open) showSheet(next, true);
+  });
 }
 
 // 封面背面印第一页：把左页当前内容抄到封面的背面去
 function syncCoverBack() {
   const back = document.querySelector(".book-cover .cover-face.back");
-  const left = document.querySelector(".book-page.left");
+  const left = $("book-spread").querySelector(":scope > .book-page.left");
   if (!back || !left) return;
   back.innerHTML = "";
   const page = document.createElement("div");
   page.className = "book-page left";
   page.innerHTML = left.innerHTML;
+  page.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
   back.appendChild(page);
 }
 
 function openBook() {
   if (bookState.open) return;
+  clearTimeout(bookState.closeTimer);
+  $("book").classList.remove("closing");
   syncCoverBack();
   bookState.open = true;
   $("book").classList.add("open");
@@ -984,6 +1006,9 @@ function openBook() {
 
 function closeBook() {
   if (!bookState.open) return;
+  const target = bookState.requestedSheet ?? bookState.sheet;
+  showSheet(target);
+  syncCoverBack();
   bookState.open = false;
   $("book").classList.add("closing");
   $("book").classList.remove("open");
@@ -999,12 +1024,12 @@ async function stepSheet(dir) {
     return;
   }
   if (!bookState.sheets.length) return;
-  const next = bookState.sheet + dir;
+  const next = (bookState.requestedSheet ?? bookState.sheet) + dir;
   if (next < 0 || next >= bookState.sheets.length) {
     toast(dir > 0 ? "已经是最后一张纸了" : "已经是第一张纸了");
     return;
   }
-  await showSheet(next, true, dir);
+  showSheet(next, true);
 }
 
 function currentPage() {

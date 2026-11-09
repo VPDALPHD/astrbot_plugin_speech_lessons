@@ -481,6 +481,9 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
 /* ---------- 书体：宽度固定为展开尺寸，书脊永远在中线 ---------- */
 .book-stage { padding: 56px 0 44px; overflow-x: auto; overflow-y: visible; }
 .book {
+  --book-paper: repeating-linear-gradient(
+    0deg, transparent 0 26px, rgba(150, 120, 70, 0.16) 26px 27px
+  ), linear-gradient(180deg, #fffaf0, #f8efdc);
   position: relative; margin: 0 auto;
   width: 980px; height: 622px;
   perspective: 3600px;
@@ -489,30 +492,46 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
 }
 .book.open { transform: none; cursor: default; }
 
+/* Two stacks of paper above the edge of the back cover. */
+.book::before, .book::after {
+  content: "";
+  position: absolute;
+  top: calc(100% - 2px);
+  width: 50%;
+  height: 15px;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, transparent 0 76%, #3a4057 77%, #232a40 92%),
+    linear-gradient(90deg, rgba(111, 79, 38, .26), transparent 13% 88%, rgba(131, 103, 65, .2)),
+    repeating-linear-gradient(177deg, #e9dbbd 0 2px, #c9b58e 2.5px 3px, #f4ead2 3.5px 5px);
+  border-radius: 0 0 11px 5px;
+  box-shadow: 0 10px 17px -7px rgba(52, 43, 31, .43);
+}
+.book::before { right: 0; transform: skewX(-11deg); transform-origin: top right; }
+.book::after {
+  left: 0;
+  border-radius: 0 0 5px 11px;
+  transform: skewX(11deg);
+  transform-origin: top left;
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+.book.open::after { opacity: 1; transition-delay: .52s; }
+
 /* ---------- 书页纸面 ---------- */
 .book-spread {
   position: absolute; inset: 0;
   display: grid; grid-template-columns: 1fr 1fr;
-  perspective: 2000px;
-  border-radius: 12px; border: 1px solid #d8c9a8;
-  background:
-    repeating-linear-gradient(
-      0deg,
-      transparent 0,
-      transparent 26px,
-      rgba(150, 120, 70, 0.16) 26px,
-      rgba(150, 120, 70, 0.16) 27px
-    ),
-    linear-gradient(180deg, #fffaf0, #f8efdc);
-  box-shadow: 0 10px 28px rgba(90, 70, 30, 0.18);
-  overflow: hidden;
-  /* 合上时只露右半（左半被裁掉） */
+  border-radius: 12px;
+  background: #e6d5b5;
+  border: 1px solid #d8c9a8;
+  box-shadow: 0 15px 28px rgba(90, 70, 30, 0.19);
   clip-path: inset(-40px -40px -40px 50%);
   transition: clip-path 0s;
   pointer-events: none;
 }
 .book.open .book-spread {
-  clip-path: inset(-40px);
+  clip-path: inset(-180px -160px -60px);
   transition: clip-path 0s linear 0.7s;
   pointer-events: auto;
 }
@@ -536,7 +555,10 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   display: flex; flex-direction: column;
   padding: 16px 20px 12px; overflow: auto; position: relative;
   color: #4b4335;
+  background: var(--book-paper);
 }
+.book-spread > .book-page.left { border-radius: 10px 0 0 10px; }
+.book-spread > .book-page.right { border-radius: 0 10px 10px 0; }
 .book-page.left { padding-right: 26px; box-shadow: inset -16px 0 20px -18px rgba(90, 70, 30, 0.35); }
 .book-page.right { padding-left: 26px; box-shadow: inset 16px 0 20px -18px rgba(90, 70, 30, 0.35); }
 .book-page.left::after {
@@ -576,27 +598,41 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   font-family: inherit;
 }
 
-/* ---------- 翻页 ---------- */
+/* ---------- Flexible leaf with two opaque paper faces ---------- */
 .flip-sheet {
-  position: absolute; top: 0; bottom: 0; width: 50%;
+  position: absolute;
+  inset: 0;
+  perspective: 3500px;
+  perspective-origin: 50% 55%;
+  pointer-events: none;
+  z-index: 6;
+}
+.flip-strip {
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 50%;
+  transform-origin: left center;
   transform-style: preserve-3d;
-  transition: transform 0.62s cubic-bezier(0.32, 0.62, 0.26, 1);
-  pointer-events: none; z-index: 6;
 }
-.flip-sheet.fwd { right: 0; transform-origin: left center; }
-.flip-sheet.back { left: 0; transform-origin: right center; }
-.flip-sheet.run.fwd { transform: rotateY(-180deg); }
-.flip-sheet.run.back { transform: rotateY(180deg); }
+.flip-sheet.backward .flip-strip {
+  left: auto;
+  right: 50%;
+  transform-origin: right center;
+}
 .flip-face {
-  position: absolute; inset: 0;
-  border-radius: 6px; overflow: hidden;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
   backface-visibility: hidden;
-  box-shadow: 0 8px 26px rgba(90, 70, 30, 0.2);
+  background: #f9efd9;
 }
-.flip-face.back { transform: rotateY(180deg); }
-.flip-face .book-page { position: absolute; inset: 0; border-radius: 6px; overflow: hidden; }
-.flip-face .book-page.left::before,
-.flip-face .book-page.right::before { display: none; }
+.flip-face.reverse { transform: rotateY(180deg); }
+.flip-face .book-page { position: absolute; top: 0; bottom: 0; overflow: hidden; }
+.book.open .flip-face .book-page :is(.book-page-head, .book-items, .book-page-foot) {
+  opacity: 1;
+  transition: none;
+}
+.flip-face .book-page::before { display: none; }
 
 /* ---------- 封面：右半 + 书脊为轴 + 正反两面 ---------- */
 .book-cover {
