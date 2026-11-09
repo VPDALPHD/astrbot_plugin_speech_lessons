@@ -6,7 +6,7 @@
     <meta http-equiv="pragma" content="no-cache" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>说话卡面板</title>
-    <link rel="stylesheet" href="./style.css?v=4.6.4" />
+    <link rel="stylesheet" href="./style.css?v=4.6.5" />
   </head>
   <body>
     <header class="top">
@@ -15,7 +15,9 @@
         <span class="badge">教我说话</span>
       </div>
       <p class="sub">私聊里教它一次，这里就会多一张卡；下面的改动下一轮对话立刻生效。</p>
-      <div class="stats" id="stats"></div>
+      <div class="stats" id="stats">
+        <button id="cfg-btn" class="ghost" title="插件设置">⚙ 设置</button>
+      </div>
     </header>
 
     <section class="book-wrap" id="book-card">
@@ -96,7 +98,6 @@
           </button>
         </div>
         <button id="new-btn" class="primary">＋ 新建卡片</button>
-        <button id="cfg-btn" class="ghost" title="插件设置">⚙ 设置</button>
       </div>
       <div id="list" class="list" aria-busy="true">
         <div class="empty">加载中…</div>
@@ -227,6 +228,6 @@
       </div>
     </div>
 
-    <script type="module" src="./app.v5402.js?v=5403"></script>
+    <script type="module" src="./app.v5402.js?v=5404"></script>
   </body>
 </html>

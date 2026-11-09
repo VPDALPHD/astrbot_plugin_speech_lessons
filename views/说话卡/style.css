@@ -60,7 +60,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: 0.2px; }
 }
 .sub { margin: 6px 0 12px; color: var(--muted); font-size: 13px; }
 
-.stats { display: flex; flex-wrap: wrap; gap: 8px; }
+.stats { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .chip {
   display: inline-flex; align-items: baseline; gap: 6px;
   padding: 6px 11px; border-radius: 10px;

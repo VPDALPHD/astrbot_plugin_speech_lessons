@@ -105,7 +105,8 @@ function renderStats(stats) {
     ["平均权重", stats.avg_weight ?? 0],
     ["反馈 👍/👎", `${stats.feedback_up ?? 0}/${stats.feedback_down ?? 0}`],
   ];
-  statsEl.innerHTML = "";
+  const settingsButton = $("cfg-btn");
+  statsEl.replaceChildren(settingsButton);
   for (const [label, value] of chips) {
     const chip = document.createElement("div");
     chip.className = "chip";
@@ -114,7 +115,7 @@ function renderStats(stats) {
     const s = document.createElement("span");
     s.textContent = label;
     chip.append(b, s);
-    statsEl.appendChild(chip);
+    settingsButton.before(chip);
   }
 }
 

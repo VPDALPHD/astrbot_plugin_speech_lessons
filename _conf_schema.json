@@ -204,10 +204,28 @@
     "hint": "默认 4 点：凌晨 4 点前说的还算昨天。不想要日界线就填 0。"
   },
   "guide_material_group": {
-    "description": "把群聊也当观察素材",
+    "description": "旧版群聊取材开关（仅用于未设置记录对象的旧配置）",
     "type": "bool",
-    "default": true,
-    "hint": "关掉后只从私聊素材里提炼，群里别人的话不会进本子。"
+    "default": true
+  },
+  "guide_record_targets": {
+    "description": "记录对象（owner=仅记录用户，all=记录任何人，specified=记录指定用户）",
+    "type": "string",
+    "default": "",
+    "options": ["owner", "all", "specified"],
+    "hint": "在插件视图选择。仅记录用户指主人私聊；指定模式按私聊 QQ 号和群聊号分别筛选。"
+  },
+  "guide_record_user_ids": {
+    "description": "允许记录的QQ号",
+    "type": "string",
+    "default": "",
+    "hint": "用 , 号分隔"
+  },
+  "guide_record_group_ids": {
+    "description": "允许记录的群聊号",
+    "type": "string",
+    "default": "",
+    "hint": "用 , 号分隔"
   },
   "guide_recall_threshold": {
     "description": "语义兜底召回相似度阈值",
