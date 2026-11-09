@@ -13,7 +13,7 @@ desc: |
 
   设置中的主人 QQ 号默认留空，由 AstrBot 管理员使用。完整用法与版本变化见 README 和 CHANGELOG。
 version: 2.6.0
-author: "VPDALPHD，DS_CHAN"
+author: "VPDALPHD，DS_CHAN，Astra"
 repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
 social_link: "https://github.com/VPDALPHD"
 tags:

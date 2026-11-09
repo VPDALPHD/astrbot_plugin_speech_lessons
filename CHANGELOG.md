@@ -1,7 +1,7 @@
 # 更新日志
 
 > 完整迭代记录。本文件同时显示在 AstrBot 面板「插件详情 → 更新日志」。
-> 作者：VPDALPHD，DS_CHAN ｜ 许可证：MIT
+> 作者：VPDALPHD，DS_CHAN，Astra ｜ 许可证：MIT
 
 ## v2.6.0（2026-11-09）
 
