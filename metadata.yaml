@@ -2,17 +2,8 @@ name: astrbot_plugin_speech_lessons
 display_name: 教我说话
 short_desc: 用自然语言教 AI 怎么接话，配合说话卡和会自己续写的观察笔记
 desc: |
-  在私聊里纠正一句说法，或给一段你认可的表达，AI 会提炼成可复用的说话卡。
-
-  - **说话卡**：保存适用场景、正反例和接话要点，在相似情境里参考。支持文字教学和截图教学，读图需要多模态模型。
-  - **人类伪装指南**：按天记下聊天、生活和做事方式里的意外发现。定时维护时可自行决定要不要写一句页尾批注，划掉的条目仍在书里留痕。
-  - **记录程度**：两档都照常记录。「仅互动」只显示和注入后台会话模型判定为人际互动的内容，切回「所有」即可查看完整记录。
-  - **管理面板**：说话卡可搜索、分页、编辑和归档，支持按创建时间或注入次数排序。指南可翻页和查找旧记录。
-  - **模型要求**：配置一个可用的 AstrBot 会话模型即可使用。向量模型可选，用于增强相似内容召回。
-  - **数据存储**：学习到的卡片和观察笔记保存在本地 SQLite，路径为 data/plugin_data/astrbot_plugin_speech_lessons/lessons.db。
-
-  设置中的主人 QQ 号默认留空，由 AstrBot 管理员使用。完整用法与版本变化见 README 和 CHANGELOG。
-version: 2.6.0
+  用自然语言教她如何说话，兼容陪伴插件和记忆插件。还能让她自己记录学习。有着简单易用的可视化管理和设置面板。支持向量导入和用户组权限配置。提供外部接口以联动其他场景的学习和记忆。
+version: 2.6.1
 author: "VPDALPHD，DS_CHAN，Astra"
 repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
 social_link: "https://github.com/VPDALPHD"
