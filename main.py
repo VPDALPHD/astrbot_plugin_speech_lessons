@@ -16,7 +16,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -397,7 +397,9 @@ class SpeechLessonsPlugin(Star):
             if rows:
                 chunks.extend(self._history_chunks(rows, source_allowed))
             else:
-                chunks.extend(self._conversations_chunks(con, _json, day, source_allowed))
+                chunks.extend(
+                    self._conversations_chunks(con, _json, start, end, source_allowed)
+                )
         finally:
             try:
                 con.close()
@@ -452,13 +454,26 @@ class SpeechLessonsPlugin(Star):
         return out
 
     @staticmethod
-    def _conversations_chunks(con: Any, json_mod: Any, day: str, source_allowed) -> list[str]:
-        """兜底：旧逻辑，按会话行 updated_at 当天 + 只取最后 40 轮。"""
+    def _conversations_chunks(
+        con: Any, json_mod: Any, start: str, end: str, source_allowed
+    ) -> list[str]:
+        """Read recent messages from conversation snapshots in the UTC window.
+
+        Args:
+            con: Read-only database connection.
+            json_mod: JSON decoder for stored conversation content.
+            start: Inclusive UTC timestamp.
+            end: Exclusive UTC timestamp.
+            source_allowed: Predicate for allowed conversation origins.
+
+        Returns:
+            Text excerpts from allowed conversations.
+        """
         try:
             rows = con.execute(
                 "SELECT user_id, content FROM conversations"
-                " WHERE updated_at LIKE ? ORDER BY rowid ASC",
-                (day + "%",),
+                " WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at, rowid",
+                (start, end),
             ).fetchall()
         except Exception:
             return []
@@ -659,8 +674,14 @@ class SpeechLessonsPlugin(Star):
         last_reply: str = "",
         source: str = "text",
         correction: tuple[int, str, str] | None = None,
+        lesson_kind: str = "chat",
     ) -> dict[str, Any] | None:
-        """调模型提炼说话卡并入库。失败返回 None。"""
+        """Extract and store speech cards from a lesson."""
+        if lesson_kind == "chat" and (
+            judge_mod.detect(note) == "chat"
+            or (not images and judge_mod.is_bare_example_request(note))
+        ):
+            return None
         api_base, api_key, model = self._direct_api()
         provider_id = "" if (api_base and model) else await self._provider_id(umo)
         if not provider_id and not (api_base and model):
@@ -684,20 +705,17 @@ class SpeechLessonsPlugin(Star):
             # 否则内容会被截断，多个要点只能提炼出一张卡。
             max_cards=int(self._cfg("max_cards_per_learn", 5)),
             note_max_chars=int(self._cfg("learn_note_max_chars", 3000)),
+            lesson_kind=lesson_kind,
         )
         if not result:
             return None
-        min_conf = float(self._cfg("min_confidence", 0.55))
-        cards = [
-            c for c in result.get("cards") or [] if float(c.get("confidence") or 0) >= min_conf
-        ]
-        notes = [str(x) for x in (result.get("guide_notes") or []) if str(x).strip()]
-        if not cards:
-            logger.info(
-                "[speech_lessons] 提炼置信度不足(%.2f)，本轮不建卡",
-                float(result.get("confidence") or 0.0),
-            )
-        stored = await self._store_cards(cards, note, source, correction=correction) if cards else []
+        cards = result["cards"]
+        notes = result["guide_notes"]
+        stored = (
+            await self._store_cards(cards, note, source, correction=correction)
+            if cards
+            else []
+        )
         # 那些"不适合做说话卡、但属于怎么说话才像人"的条目，写进指南书最新一页
         added_notes = 0
         if notes and bool(self._cfg("guide_autowrite_enabled", True)):
@@ -891,7 +909,9 @@ class SpeechLessonsPlugin(Star):
         umo = self._session_key(event)
         feedback = judge_mod.detect_feedback(note)
 
-        level = judge_mod.detect(note, has_image=has_image)
+        level = judge_mod.detect(note)
+        if feedback is False and level == "chat":
+            feedback = None
         sent = self._sent_card_replies.pop(umo, None)
         last_reply = self._last_reply_text(umo)
         correction = None
@@ -900,12 +920,17 @@ class SpeechLessonsPlugin(Star):
             reply_text = norm_key(last_reply)
             quotes = [norm_key(quote) for quote in judge_mod.quoted(note)]
             used = [
-                card for card in cards
+                card
+                for card in cards
                 if len(norm_key(card.good)) >= 2 and norm_key(card.good) in reply_text
             ]
             named = [
-                (card, quote) for card in cards for quote in quotes
-                if len(quote) >= 2 and quote in reply_text and quote in norm_key(card.good)
+                (card, quote)
+                for card in cards
+                for quote in quotes
+                if len(quote) >= 2
+                and quote in reply_text
+                and quote in norm_key(card.good)
             ]
             if len({card.id for card, _ in named}) == 1:
                 card, quote = named[0]
@@ -921,12 +946,17 @@ class SpeechLessonsPlugin(Star):
             self._pending_notes[umo] = (
                 "主人刚说你刚才那条又不对了，这轮先按他的意思改，不要辩解。"
             )
-        if feedback is None and level == "chat":
+        if feedback is None and level == "chat" and not has_image:
             return
 
         images = await self._image_paths(event)
         await self._buffer_capture(
-            umo, note, images, bool(has_image), last_reply=last_reply, correction=correction
+            umo,
+            note,
+            images,
+            bool(has_image),
+            last_reply=last_reply,
+            correction=correction,
         )
 
     async def _buffer_capture(
@@ -1092,7 +1122,14 @@ class SpeechLessonsPlugin(Star):
         return now.strftime("%Y-%m-%d")
 
     def _day_window(self, day: str) -> tuple[str, str]:
-        """某一天在数据库里的时间窗： [day cut:00, 次日 cut:00)。"""
+        """Convert a local journal day into a half-open SQLite UTC window.
+
+        Args:
+            day: Local journal date in YYYY-MM-DD format.
+
+        Returns:
+            UTC start and end timestamps without a time zone suffix.
+        """
         try:
             base = datetime.strptime(str(day or "")[:10], "%Y-%m-%d")
         except ValueError:
@@ -1100,8 +1137,8 @@ class SpeechLessonsPlugin(Star):
         start = base + timedelta(hours=self._day_cut_hour())
         end = start + timedelta(days=1)
         return (
-            start.strftime("%Y-%m-%d %H:%M:%S"),
-            end.strftime("%Y-%m-%d %H:%M:%S"),
+            start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            end.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         )
 
     def _record_scope(self) -> str:
@@ -1879,6 +1916,26 @@ class SpeechLessonsPlugin(Star):
         if guide_block:
             blocks.append(guide_block)
 
+        tools = getattr(getattr(req, "func_tool", None), "tools", None) or ()
+        if (
+            text.strip()
+            and self._journal_enabled()
+            and any(
+                getattr(tool, "name", None) == "note_human_guide"
+                and getattr(tool, "active", True)
+                for tool in tools
+            )
+            and self._journal_can_edit(event)
+            and self._guide_source_filter()(self._session_key(event))
+        ):
+            blocks.append(
+                "（这是我自己的观察手记。聊到让我在意、意外、好笑或还想回味的小事时，"
+                "可以当下用 note_human_guide(mode=write, content=…) 记下最想留的一条。"
+                "一次具体的反应、习惯或做法也值得记，写清当时发生了什么和我注意到的细节。"
+                "已有类似观察或没有值得记的新细节就继续聊，拿不准是否重复时再查。"
+                "只写对话里确实发生的事，省略人名和隐私。写完自然接着聊，手记留给我自己。）"
+            )
+
         if bool(self._cfg("inject_enabled", True)):
             query_vec = None
             if self.embed.enabled and text:
@@ -1969,20 +2026,29 @@ class SpeechLessonsPlugin(Star):
     async def learn_from_note(
         self, note: str, *, umo: str = "", source: str = "external"
     ) -> dict | None:
-        """外部插件把一段「优秀范例 + 主人原话」交来提炼说话卡。
+        """Learn from a dialogue example supplied by another plugin.
 
-        与私聊教学共用同一条提炼链（learner.learn_cards + 置信度门槛 + 上限检查），
-        只是入口不同：B站点播看完视频、主人说「学学」时走这里。
+        Args:
+            note: Verbatim dialogue and the conversational context.
+            umo: Origin used to resolve the chat provider.
+            source: The caller's material source.
+
+        Returns:
+            Learning result, or None when the material is unsuitable.
         """
         text = str(note or "").strip()
+        source = str(source or "external")
         if not text or not self._enabled():
+            return None
+        # The installed video adapters pass generated summaries, without a transcript.
+        if source in {"bili_video", "local_video"}:
             return None
         helper = getattr(self, "_learn", None)
         if not callable(helper):
             return None
         try:
             return await helper(
-                umo=str(umo or ""), note=text, source=str(source or "external")
+                umo=str(umo or ""), note=text, source=source, lesson_kind="external"
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[speech_lessons] 外部学习失败: %s", exc)
@@ -3043,8 +3109,8 @@ class SpeechLessonsPlugin(Star):
         同一句话只需要调一次；学过之后不要向主人复述规则内容。
 
         Args:
-            note(string): 主人这次教你的原话，尽量原样照抄。
-            focus(string): 你想额外强调的重点（如"别反问"），没有就留空。
+            note(string): 兼容旧调用。教学依据取当前用户消息原文。
+            focus(string): 兼容旧调用。模型推断的重点不作为教学依据。
         """
         # 未授权/非私聊/关闭时返回 None：不往 prompt 里塞拒绝文案，避免污染对话
         if not self._enabled() or not bool(self._cfg("learn_enabled", True)):
@@ -3054,19 +3120,16 @@ class SpeechLessonsPlugin(Star):
         try:
             is_private = bool(event.is_private_chat())
         except Exception:
-            is_private = True
+            return None
         if not is_private:
             return None
 
         raw = str(getattr(event, "message_str", "") or "").strip()
-        text = (note or raw).strip()
-        if focus:
-            text = f"{text}\n（重点：{focus}）"
-        if not text:
-            return "没听清这次的教学内容，没有记录。"
+        if judge_mod.is_command(raw) or judge_mod.detect(raw) == "chat":
+            return "当前消息没有明确的说话教学要求，没有写入说话卡。"
 
         umo = self._session_key(event)
-        key = self._claim(umo, raw or text)
+        key = self._claim(umo, raw)
         if not key:
             return "这次的说法刚刚已经记下了，不用重复学，顺着主人的口气回一句就行。"
         images = await self._image_paths(event)
@@ -3074,7 +3137,7 @@ class SpeechLessonsPlugin(Star):
         try:
             result = await self._learn(
                 umo=umo,
-                note=text,
+                note=raw,
                 images=images,
                 last_reply=self._last_reply_text(umo),
                 source="image" if images else "tool",
@@ -3083,7 +3146,9 @@ class SpeechLessonsPlugin(Star):
             if not result:
                 self._release(key)
         if not result:
-            return "这次没能提炼出可用的说法（可能内容太模糊或模型超时），没有写进规矩。"
+            return (
+                "这次没能提炼出可用的说法（可能内容太模糊或模型超时），没有写进规矩。"
+            )
         self._drop_buffer(umo)
         scenes = [c.get("scene") for c in result["cards"] if c.get("scene")]
         tail = f"（场景：{scenes[0]}）" if scenes else ""
@@ -3214,16 +3279,17 @@ class SpeechLessonsPlugin(Star):
         content: str = "",
         mode: str = "check",
     ) -> str | None:
-        """往自己的指南书里记一条「人类」观察之前，先查以前写过什么（按日期查）。
+        """在聊天时随手记录一件我在意的人类小事。
 
-        用法：先 check（默认）看有没有写过类似的；
-        - 旧条目写错了 → 用 edit_human_guide(action=update, target=旧片段, content=新写法) 改掉它（不新增）
-        - 整条作废 → 用 edit_human_guide(action=remove, target=旧片段) 划掉它，再写新的
-        - 确实没写过 → 再用 mode=write 写进今天这一页
+        有具体的新观察就用 mode=write 记进今天这一页。只发生一次的反应、习惯或做法也可以写。
+        怀疑以前写过才用 mode=check。已有条目需要更正时，用 edit_human_guide 改写或划掉。
 
         Args:
-            content(string): 要记的那条观察，一句话，用「人类」开头
-            mode(string): check（先查旧账，默认）或 write（直接写进今天）
+            content(string): 一句以「人类」开头的观察，写清场合和实际发生的细节。
+            mode(string): write（直接记新观察）或 check（默认，查找类似旧条目）。
+
+        Returns:
+            写入结果或相关旧条目。没有写入权限时返回 None。
         """
         if not self._journal_can_edit(event):
             return None
@@ -3271,8 +3337,8 @@ class SpeechLessonsPlugin(Star):
         每页是若干条条目，条目全部用「我」说话：我观察到什么、我以前怎么做、我以后怎么改；
         写人类的时侯要口语化（"人聊天经常不把话说完，留半句等我接"），不要写成说明书。
 
-        什么时候用：主人教你一条通用说话方式；或你观察到人类的普遍现象值得记下来。
-        不要写：具体人名、别人的事、事实、日程、约定、隐私、一次性要求（那些属于记忆工具）。
+        什么时候用：整理或更正指南里的条目。聊天中新发现的小事可以直接用 note_human_guide(mode=write) 记下。
+        偶然发生一次的反应也可以记，写清场合。省略具体人名、日程、约定、隐私和一次性要求。
 
         action（改某天：先 edit 拿行号，再用行号操作，不必整页重写）：
         - list：看书目录
@@ -3572,6 +3638,7 @@ class SpeechLessonsPlugin(Star):
                     images=images,
                     last_reply=self._last_reply_text(umo),
                     source="command",
+                    lesson_kind="command",
                 )
             finally:
                 if not result:

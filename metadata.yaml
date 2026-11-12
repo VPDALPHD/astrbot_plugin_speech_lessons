@@ -3,7 +3,7 @@ display_name: 教我说话
 short_desc: 用自然语言教 AI 怎么接话，配合说话卡和会自己续写的观察笔记
 desc: |
   用自然语言教她如何说话，兼容陪伴插件和记忆插件。还能让她自己记录学习。有着简单易用的可视化管理和设置面板。支持向量导入和用户组权限配置。提供外部接口以联动其他场景的学习和记忆。
-version: 2.6.1
+version: 2.6.2
 author: "VPDALPHD，DS_CHAN，Astra"
 repo: "https://github.com/VPDALPHD/astrbot_plugin_speech_lessons"
 social_link: "https://github.com/VPDALPHD"
