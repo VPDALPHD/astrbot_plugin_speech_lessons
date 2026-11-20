@@ -95,9 +95,8 @@ h1 { margin: 0; font-size: 20px; letter-spacing: 0.2px; }
 button.primary {
   border: 0; cursor: pointer; color: #fff; font-weight: 600;
   background: var(--accent); padding: 9px 15px; border-radius: 10px;
-  transition: filter 0.15s ease;
 }
-button.primary:hover { filter: brightness(1.08); }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.ghost {
   border: 1px solid var(--border); background: transparent; color: var(--text);
   padding: 8px 14px; border-radius: 10px; cursor: pointer;
@@ -206,7 +205,7 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 20px);
   background: var(--panel); color: var(--text); border: 1px solid var(--border);
   padding: 10px 18px; border-radius: 999px; box-shadow: var(--shadow);
-  opacity: 0; pointer-events: none; transition: all 0.22s ease; font-size: 13px;
+  opacity: 0; pointer-events: none; font-size: 13px;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-color: var(--bad); color: var(--bad); }
@@ -376,10 +375,8 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
 .guide-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .guide-actions .hint { flex: 1; }
 .guide-actions-top { display: flex; gap: 8px; align-items: center; }
-#guide-text {
-  font-family: "GuideBook", "Songti SC", serif;
+#guide-text, #guide-notes {
   width: 100%;
-  min-height: 320px;
   resize: vertical;
   padding: 12px 14px;
   border-radius: 10px;
@@ -390,7 +387,10 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   line-height: 1.8;
   font-family: inherit;
 }
-#guide-text:focus { outline: 2px solid var(--accent-soft, rgba(80, 130, 255, 0.35)); }
+#guide-text { min-height: 240px; }
+#guide-text:focus, #guide-notes:focus {
+  outline: 2px solid var(--accent-soft, rgba(80, 130, 255, 0.35));
+}
 #guide-mask .dialog-body { display: grid; gap: 8px; }
 /* 指南注入滑动开关 */
 .switch-inline { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
@@ -844,6 +844,94 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
 .card-sort button:hover { border-color: var(--accent); }
 .card-page-number { min-width: 52px; text-align: center; color: var(--text); }
 .card-page-size { justify-self: end; }
+
+button.ghost:where(:hover:not(:disabled)),
+.seg button:where(:hover:not(.on)) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.card-sort select:hover, .card-page-size select:hover { border-color: var(--accent); }
+button:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.switch-inline input:focus-visible + .track { box-shadow: 0 0 0 3px var(--accent-soft); }
+
+@media (prefers-reduced-motion: no-preference) {
+  :root {
+    --control-time: 150ms;
+    --motion-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+  button {
+    transition: background-color var(--control-time) ease, color var(--control-time) ease,
+      border-color var(--control-time) ease, filter var(--control-time) ease,
+      opacity var(--control-time) ease, scale 100ms var(--motion-ease);
+  }
+  button:active:not(:disabled) { scale: 0.96; }
+  .search, .book-search, .field input, .field textarea,
+  .card-sort select, .card-page-size select {
+    transition: border-color var(--control-time) ease, box-shadow var(--control-time) ease;
+  }
+  .sort-direction path { transition: color var(--control-time) ease, opacity var(--control-time) ease; }
+  .switch-inline .track, .field.switch .track {
+    transition: background-color var(--control-time) ease, box-shadow var(--control-time) ease;
+  }
+  .switch-inline .track::after, .field.switch .track::after {
+    transition: transform 200ms var(--motion-ease), scale 100ms var(--motion-ease);
+  }
+  .switch-inline:active .track::after, .field.switch:active .track::after { scale: 0.87; }
+
+  .list > .card, .list > .empty, .book-search-hit:not(.hidden) > *,
+  .cfg-grid > [data-show-key]:not(.hidden) {
+    animation: panel-item-in 200ms var(--motion-ease) backwards;
+  }
+  .list > .card:nth-child(2) { animation-delay: 18ms; }
+  .list > .card:nth-child(3) { animation-delay: 36ms; }
+  .list > .card:nth-child(n + 4) { animation-delay: 54ms; }
+  .card {
+    transition: translate 180ms var(--motion-ease), border-color var(--control-time) ease,
+      box-shadow 180ms ease, opacity var(--control-time) ease;
+  }
+
+  .mask { transition: opacity 180ms ease; }
+  .mask.hidden { opacity: 0; pointer-events: none; }
+  .dialog { transition: transform 200ms var(--motion-ease); }
+  .mask.hidden > .dialog { transform: translateY(8px) scale(0.985); }
+  @starting-style {
+    .mask:not(.hidden) { opacity: 0; }
+    .mask:not(.hidden) > .dialog { transform: translateY(8px) scale(0.985); }
+  }
+  @supports (interactivity: inert) {
+    .mask { transition: opacity 180ms ease, display 180ms allow-discrete; }
+    .mask.hidden { interactivity: inert; }
+  }
+  .toast {
+    transform: translate(-50%, 10px);
+    transition: opacity 180ms ease, transform 200ms var(--motion-ease);
+  }
+  .toast.show { transform: translate(-50%, 0); }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .card:hover, .card:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 10px 28px var(--accent-soft);
+  }
+  .card.archived:hover, .card.archived:focus-within { opacity: 1; }
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .card:hover { translate: 0 -2px; }
+}
+
+@keyframes panel-item-in {
+  from { opacity: 0.45; transform: translateY(6px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch-inline .track, .switch-inline .track::after,
+  .field.switch .track, .field.switch .track::after { transition: none; }
+  .book-hint { animation: none; }
+}
 
 @media (max-width: 480px) {
   .card-section .toolbar { gap: 8px; }

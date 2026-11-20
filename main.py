@@ -1466,16 +1466,6 @@ class SpeechLessonsPlugin(Star):
 
     # ------------------------------------------------------------ 书页条目
     @staticmethod
-    def _split_items(text: str) -> list[str]:
-        """把一页正文拆成条目（去掉编号与项目符号）。"""
-        items: list[str] = []
-        for line in str(text or "").splitlines():
-            body = re.sub(r"^\s*\d+[.、)）]\s*", "", line).lstrip("-• ").strip()
-            if body:
-                items.append(body)
-        return items
-
-    @staticmethod
     def _join_items(items: list[str]) -> str:
         return "\n".join(f"{i}. {item}" for i, item in enumerate(items, 1))
 
@@ -1542,11 +1532,27 @@ class SpeechLessonsPlugin(Star):
         self._journal_vec_at = 0.0
         return snapshot
 
-    def _write_page_items(self, day: str, content: str, source: str) -> int:
-        """Write a page snapshot; classifications follow exact text."""
+    def _write_page_items(
+        self, day: str, content: str, source: str, *, notes: str | None = None
+    ) -> int:
+        """Store a page with optional explicit footer notes.
+
+        Args:
+            day: Journal date.
+            content: Entry text, or a combined snapshot for older callers.
+            source: Source recorded when creating a page.
+            notes: Explicit footer text from the editor, one note per line.
+
+        Returns:
+            The ID of the saved page.
+        """
+        lines = self._parse_lines(content)
+        if notes is not None:
+            lines = [("item" if kind == "note" else kind, text) for kind, text in lines]
+            lines.extend(("note", line) for line in notes.splitlines())
+        items = [{"kind": kind, "text": text} for kind, text in lines]
         page = self.store.journal_page_by_day(day)
         page_id = int(page["id"]) if page else int(self.store.journal_upsert(day, "", source=source))
-        items = [{"kind": kind, "text": text} for kind, text in self._parse_lines(content)]
         self._save_items(page_id, day, items)
         return page_id
 
@@ -2835,7 +2841,7 @@ class SpeechLessonsPlugin(Star):
                     "day": page["day"],
                     "chars": page["chars"],
                     "content": page["content"],
-                    "items": len(self._split_items(str(page["content"]))),
+                    "items": sum(row.get("kind") != "note" for row in rows),
                     "rows": [
                         {
                             "kind": str(row.get("kind") or "item"),
@@ -2924,15 +2930,27 @@ class SpeechLessonsPlugin(Star):
         )
 
     async def page_save_journal(self):
-        """保存日记页：{day, content} 或 {page_id, content}。"""
+        """Save a journal page by date or ID, with optional separate notes.
+
+        Returns:
+            The saved page ID and date, or a validation error.
+        """
         if self._record_scope() == "interaction":
             return error_response("编辑整页前，请先将记录程度切换为「所有」。")
         payload = await request.json(default={})
         if not isinstance(payload, dict):
             return error_response("请求体必须是 JSON 对象")
         content = str(payload.get("content") or "").strip()
-        if len(content) > self._journal_store_cap():
-            return error_response(f"这一页太长了（单页上限 {self._journal_store_cap()} 字）")
+        notes = payload.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            return error_response("页尾批注必须是文本")
+        char_count = len(content)
+        if notes:
+            notes = notes.strip()
+            char_count += len(notes) + int(bool(content and notes))
+        cap = self._journal_store_cap()
+        if char_count > cap:
+            return error_response(f"这一页太长了（单页上限 {cap} 字）")
         page_id = payload.get("page_id")
         day = str(payload.get("day") or "").strip()
         try:
@@ -2945,9 +2963,9 @@ class SpeechLessonsPlugin(Star):
                 day = self._day_key()
             if len(day) != 10:
                 return error_response("日期格式应为 YYYY-MM-DD")
-            # 编辑保存：所见即所得；只把编号/划线格式规范化
-            content = self._normalize_lines(self._parse_lines(content))
-            new_id = self._write_page_items(day, content, "panel")
+            if notes is None:
+                content = self._normalize_lines(self._parse_lines(content))
+            new_id = self._write_page_items(day, content, "panel", notes=notes)
         except (TypeError, ValueError):
             return error_response("参数不合法")
         except Exception as exc:  # noqa: BLE001
@@ -2955,7 +2973,7 @@ class SpeechLessonsPlugin(Star):
             return error_response(f"保存失败：{exc}", status_code=500)
         self._journal_vec_at = 0.0
         await self._journal_after_write(new_id)
-        logger.info("[speech_lessons] 日记页已保存（%s，%d 字）", day, len(content))
+        logger.info("[speech_lessons] Saved journal page (%s, %d characters)", day, char_count)
         return json_response({"ok": True, "page_id": new_id, "day": day})
 
     async def page_delete_journal(self):

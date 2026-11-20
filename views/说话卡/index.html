@@ -6,7 +6,7 @@
     <meta http-equiv="pragma" content="no-cache" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>说话卡面板</title>
-    <link rel="stylesheet" href="./style.css?v=4.6.6" />
+    <link rel="stylesheet" href="./style.css?v=4.6.8" />
   </head>
   <body>
     <header class="top">
@@ -62,9 +62,9 @@
         <span class="book-indicator" id="book-indicator">— / —</span>
         <button id="book-next" class="ghost" title="下一页">›</button>
         <span class="book-sep" aria-hidden="true"></span>
-        <input id="book-search" class="book-search" type="search" placeholder="输关键词翻旧页，回车" />
+        <input id="book-search" class="book-search" type="search" placeholder="输入关键词或日期（如 11-19），回车" aria-label="按关键词或日期查找指南书记录" title="日期支持 YYYY-MM-DD 或 M-D，省略年份时按今年查找" />
         <button id="book-edit" class="ghost">编辑</button>
-        <button id="book-review" class="ghost">重写今日</button>
+        <button id="book-review" class="ghost" title="不支持重写往日">重写今日</button>
         <label class="switch-inline" title="关闭后不再注入，但她仍可自己续写">
           <input type="checkbox" id="guide-toggle" />
           <span class="track"></span>
@@ -72,7 +72,7 @@
         </label>
       </div>
       <p class="guide-meta" id="guide-meta">每轮只读最近几页，不是整本。</p>
-      <div id="book-search-hit" class="book-search-hit hidden"></div>
+      <div id="book-search-hit" class="book-search-hit hidden" aria-live="polite"></div>
     </section>
 
     <main class="card-section" aria-labelledby="cards-title">
@@ -199,7 +199,11 @@
           </label>
           <label class="field">
             <span>条目</span>
-            <textarea id="guide-text" rows="14" placeholder="1. 我发现人聊天经常不把话说完，留半句等我接，我别急着替人补完。&#10;2. 我以前一上来就想总结成三点，其实人不会这么说话，我以后先顺着说一句。&#10;3. 人被夸第一反应往往是“哪有”，然后才笑，我别急着谦虚。"></textarea>
+            <textarea id="guide-text" rows="10" placeholder="1. 我发现人聊天经常不把话说完，留半句等我接，我别急着替人补完。&#10;2. 我以前一上来就想总结成三点，其实人不会这么说话，我以后先顺着说一句。&#10;3. 人被夸第一反应往往是“哪有”，然后才笑，我别急着谦虚。"></textarea>
+          </label>
+          <label class="field">
+            <span>页尾批注 <em>可写多行</em></span>
+            <textarea id="guide-notes" rows="3"></textarea>
           </label>
           <p class="hint" id="guide-count">0 字</p>
         </div>
@@ -228,6 +232,6 @@
       </div>
     </div>
 
-    <script type="module" src="./app.v5402.js?v=5405"></script>
+    <script type="module" src="./app.v5402.js?v=5407"></script>
   </body>
 </html>

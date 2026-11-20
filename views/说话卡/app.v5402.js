@@ -642,6 +642,7 @@ const bookState = {
   requestedSheet: null,
   closeTimer: null,
   confirmAction: null,
+  searchId: 0,
 };
 
 const LINES_PER_PAGE = 19; // 每页固定 19 行（行高 27px）
@@ -771,9 +772,12 @@ function buildSheets() {
   return sheets;
 }
 
-async function loadBook() {
+async function loadBook({ focusDay = "" } = {}) {
   try {
     const data = await bridge.apiGet("journal", {});
+    const previousIndex = bookState.requestedSheet ?? bookState.sheet;
+    const previousSheet = bookState.sheets[previousIndex];
+    const wasAtEnd = previousIndex >= bookState.sheets.length - 1;
     const pages = ((data && data.pages) || [])
       .slice()
       .sort((a, b) => String(a.day).localeCompare(String(b.day)));
@@ -798,9 +802,21 @@ async function loadBook() {
         ` · 上限 ${bookState.limit} 字`;
       const edited = fmtDateTime(stats.latest_at);
       $("book-updated").textContent = edited ? `最后编辑于 ${edited}` : "";
-      if (!bookState.open) bookState.sheet = bookState.sheets.length - 1;
-      bookState.sheet = Math.min(bookState.sheet, bookState.sheets.length - 1);
-      await showSheet(bookState.sheet);
+      const target = focusDay
+        ? bookState.sheets.findLastIndex((sheet) => sheet.day === focusDay)
+        : -1;
+      if (target < 0) {
+        showSheet(bookState.open ? bookState.sheet : bookState.sheets.length - 1);
+      } else if (bookState.open && !wasAtEnd && previousSheet) {
+        const start = bookState.sheets.findIndex(
+          (sheet) => sheet.pageId === previousSheet.pageId && sheet.cont === previousSheet.cont,
+        );
+        showSheet(start < 0 ? previousIndex : start);
+        showSheet(target, true);
+      } else {
+        showSheet(target);
+        openBook();
+      }
     } else {
       renderEmptySheet();
       $("book-updated").textContent = "";
@@ -1040,13 +1056,49 @@ function currentPage() {
 async function searchBook() {
   const word = $("book-search").value.trim();
   const hitBox = $("book-search-hit");
+  const searchId = ++bookState.searchId;
   hitBox.innerHTML = "";
-  if (!word) {
-    hitBox.classList.add("hidden");
-    return;
-  }
+  hitBox.classList.add("hidden");
+  if (!word) return;
+
   try {
+    const dateMatch = /^(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$/.exec(word);
+    if (dateMatch) {
+      const [, year = todayStr().slice(0, 4), month, dayOfMonth] = dateMatch;
+      const day = `${year}-${month.padStart(2, "0")}-${dayOfMonth.padStart(2, "0")}`;
+      const date = new Date(`${day}T00:00:00Z`);
+      if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== day) {
+        hitBox.classList.remove("hidden");
+        hitBox.append(el("span", "book-hit-empty", `「${word}」不是有效日期`));
+        return;
+      }
+
+      let index = bookState.sheets.findIndex((sheet) => sheet.day === day);
+      const alreadyLoaded = index >= 0;
+      if (!alreadyLoaded) {
+        const data = await bridge.apiGet("journal/page", { day });
+        if (searchId !== bookState.searchId) return;
+        index = bookState.sheets.findIndex((sheet) => sheet.day === day);
+        if (index < 0 && data?.page?.day === day) {
+          bookState.pages.push({ ...data.page, rows: data.rows });
+          bookState.pages.sort((a, b) => a.day.localeCompare(b.day));
+          bookState.sheets = buildSheets();
+          index = bookState.sheets.findIndex((sheet) => sheet.day === day);
+          $("book-cover-sub").textContent = `共 ${bookState.pages.length} 天 · ${bookState.sheets.length} 张`;
+        }
+      }
+      if (index < 0) {
+        hitBox.classList.remove("hidden");
+        hitBox.append(el("span", "book-hit-empty", `${day} 没有记录`));
+        return;
+      }
+      showSheet(index, alreadyLoaded && bookState.open);
+      openBook();
+      return;
+    }
+
     const data = await bridge.apiGet("journal/search", { q: word });
+    if (searchId !== bookState.searchId) return;
     const pages = (data && data.pages) || [];
     hitBox.classList.remove("hidden");
     if (!pages.length) {
@@ -1070,20 +1122,33 @@ async function searchBook() {
       hitBox.append(btn);
     }
   } catch (error) {
+    if (searchId !== bookState.searchId) return;
     toast((error && error.message) || "查询失败", true);
   }
 }
 
-// 编辑弹窗当前载入的是哪一天、当时原文是什么（用来判断有没有未保存改动）
-const editorState = { day: "", text: "" };
+// Keep the original fields for detecting unsaved changes when switching dates.
+const editorState = { day: "", text: "", notes: "" };
 
 function paintEditor(day, page) {
   bookState.editing = page || null;
+  const entries = [];
+  const notes = [];
+  for (const row of pageItems(page)) {
+    if (row.kind === "note") {
+      notes.push(row.text);
+      continue;
+    }
+    const body = row.kind === "struck" ? `[strike]${row.text}[/strike]` : row.text;
+    entries.push(`${entries.length + 1}. ${body}`);
+  }
   editorState.day = day;
-  editorState.text = page ? page.content || "" : "";
+  editorState.text = entries.join("\n");
+  editorState.notes = notes.join("\n");
   $("guide-day").value = day;
   $("guide-dlg-title").textContent = page ? `编辑 ${day}` : `写 ${day}`;
   $("guide-text").value = editorState.text;
+  $("guide-notes").value = editorState.notes;
   $("guide-err").textContent = page ? "" : "这一天还没写过，保存会新建这一页。";
   updateGuideCount();
 }
@@ -1094,7 +1159,7 @@ async function applyDayToEditor(day) {
   if (!page) {
     try {
       const data = await bridge.apiGet("journal/page", { day });
-      page = (data && data.page) || null;
+      page = data?.page ? { ...data.page, rows: data.rows } : null;
     } catch (error) {
       page = null;
     }
@@ -1120,14 +1185,12 @@ function bindGuideDayPicker() {
   input.dataset.bound = "1";
   input.addEventListener("change", () => {
     const day = input.value || todayStr();
-    const current = String($("guide-text").value || "");
-    if (current !== editorState.text && current.trim()) {
+    if ($("guide-text").value !== editorState.text || $("guide-notes").value !== editorState.notes) {
       input.value = editorState.day; // 回退日期，避免静默丢掉未保存的改动
       $("guide-err").textContent = "当前有未保存的修改，先保存再切换日期。";
       return;
     }
     editorState.day = day;
-    editorState.text = current;
     applyDayToEditor(day);
   });
 }
@@ -1139,16 +1202,18 @@ function closeGuideEditor() {
 
 function updateGuideCount() {
   const text = $("guide-text").value || "";
-  const lineCount = parseLines(text).length;
-  $("guide-count").textContent = `${text.length} 字 · ${lineCount} 条`;
+  const notes = $("guide-notes").value || "";
+  $("guide-count").textContent = `${text.length + notes.length} 字 · ${parseLines(text).length} 条`;
 }
 
 async function savePage() {
+  if ($("guide-save").disabled) return;
   const content = $("guide-text").value.trim();
+  const notes = $("guide-notes").value.trim();
   const day = $("guide-day").value || todayStr();
   $("guide-save").disabled = true;
   try {
-    await bridge.apiPost("journal/save", { day, content });
+    await bridge.apiPost("journal/save", { day, content, notes });
     closeGuideEditor();
     toast("已保存");
     await loadBook();
@@ -1201,20 +1266,18 @@ async function writeTodayNow() {
   btn.disabled = true;
   btn.textContent = "写着…";
   try {
-    const result = await bridge.apiPost("journal/write_today", { day: todayStr() });
-    if (result && result.ok) {
-      toast(
-        result.overwritten
-          ? `今天的记录已重写（${result.items} 条）`
-          : `今天的记录写好了（${result.items} 条）`,
-      );
-    } else {
+    const day = todayStr();
+    const result = await bridge.apiPost("journal/write_today", { day });
+    if (!result?.ok) {
       toast((result && result.message) || "这次没写出来", true);
+      return;
     }
-    await loadBook();
-    if (!bookState.open) openBook();
-    const idx = bookState.sheets.findIndex((s) => s.day === todayStr() && s.cont === 0);
-    if (idx >= 0) await showSheet(idx);
+    toast(
+      result.overwritten
+        ? `今天的记录已重写（${result.items} 条）`
+        : `今天的记录写好了（${result.items} 条）`,
+    );
+    await loadBook({ focusDay: result.day || day });
   } catch (error) {
     toast((error && error.message) || "重写今日失败", true);
   } finally {
@@ -1289,8 +1352,12 @@ async function main() {
       openPageEditor(page);
     });
   });
+  $("book-search").addEventListener("input", () => {
+    bookState.searchId += 1;
+    $("book-search-hit").classList.add("hidden");
+  });
   $("book-search").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
+    if (event.key === "Enter" && !event.isComposing) {
       event.preventDefault();
       searchBook();
     }
@@ -1303,6 +1370,7 @@ async function main() {
   $("guide-cancel").addEventListener("click", closeGuideEditor);
   $("guide-save").addEventListener("click", savePage);
   $("guide-text").addEventListener("input", updateGuideCount);
+  $("guide-notes").addEventListener("input", updateGuideCount);
   $("cfg-btn").addEventListener("click", openConfig);
   $("cfg-close").addEventListener("click", closeConfig);
   $("cfg-cancel").addEventListener("click", closeConfig);
