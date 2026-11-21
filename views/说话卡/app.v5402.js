@@ -626,23 +626,17 @@ async function testEmbedding(event) {
   }
 }
 
-/* ------------------------------------------------------------ 人类伪装指南 · 这本子（按天） */
+/* ------------------------------------------------------------ 人类伪装指南 · 连续书页 */
 const bookState = {
-  pages: [], // 按日期正序：{ id, day, content }
-  sheets: [], // 展示用的“纸”：一天写多了就多占几张
+  sheets: [], // 展示用的“纸”：按纸面容量连续排版
   sheet: 0,
-  pageId: null,
-  editing: null,
   open: false,
-  enabled: true,
-  limit: 8000,
-  injectDays: 2,
-  recallDays: 2,
-  flip: null,
-  requestedSheet: null,
+  scope: "all",
   closeTimer: null,
   confirmAction: null,
   searchId: 0,
+  loadId: 0,
+  revision: null,
 };
 
 const LINES_PER_PAGE = 19; // 每页固定 19 行（行高 27px）
@@ -661,53 +655,13 @@ function todayStr() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-// 一行分三类：item（编号条目）/ note（批注）/ struck（被划掉的旧条目）
-function parseLines(text) {
-  const out = [];
-  for (const raw of String(text || "").split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    let m = /^(?:\d+[.、)）]\s*)?\[strike\]([\s\S]*?)\[\/strike\]$/.exec(line);
-    if (m) {
-      out.push({ kind: "struck", text: m[1].trim() });
-      continue;
-    }
-    m = /^(\d+)[.、)）]\s*(.+)$/.exec(line);
-    if (m) {
-      out.push({ kind: "item", text: m[2].trim() });
-      continue;
-    }
-    out.push({ kind: "note", text: line });
-  }
-  return out;
-}
-
-function appendRichText(node, text) {
-  const re = /\[strike\]([\s\S]*?)\[\/strike\]/g;
-  let last = 0;
-  let match;
-  while ((match = re.exec(text))) {
-    if (match.index > last) {
-      node.append(document.createTextNode(text.slice(last, match.index)));
-    }
-    const struck = document.createElement("s");
-    struck.className = "strike";
-    struck.textContent = match[1];
-    node.append(struck);
-    last = match.index + match[0].length;
-  }
-  if (last < text.length) {
-    node.append(document.createTextNode(text.slice(last)));
-  }
-}
-
 // 一条占几行：去掉 [strike] 标签后按每行 30 字估算
 function itemLines(item) {
   const plain = String(item && item.text !== undefined ? item.text : item || "");
-  return Math.max(1, Math.ceil(plain.length / CHARS_PER_LINE));
+  return plain.split(/\r?\n/).reduce((sum,line) => sum + Math.max(1, Math.ceil(line.length / CHARS_PER_LINE)), 0);
 }
 
-// 按行容量把一天的条目切成若干页（长条目整条挪到下一页，不切断）
+// 按行容量将全书条目连续排入纸页（长条目整条挪到下一页，不切断）
 function paginate(items) {
   const pages = [[]];
   let used = 0;
@@ -729,113 +683,65 @@ function countItems(list) {
 }
 
 // 后端给的是结构化行（带 tag）；老数据没有 rows 时退回解析 content 快照
-function pageItems(page) {
-  const rows = page && Array.isArray(page.rows) ? page.rows : null;
-  if (rows && rows.length) {
-    return rows
-      .map((row) => ({
-        kind: String(row.kind || "item"),
-        text: String(row.text || ""),
-        tag: String(row.tag || ""),
-      }))
-      .filter((row) => row.text);
-  }
-  return parseLines((page && page.content) || "");
-}
-
-function buildSheets() {
+function buildSheets(entries) {
+  const pages = paginate(entries);
   const sheets = [];
-  for (const page of bookState.pages) {
-    const items = pageItems(page);
-    if (!items.length) {
-      sheets.push({ day: page.day, cont: 0, pageId: page.id, left: [], right: [] });
-      continue;
-    }
-    const pagesOfDay = paginate(items);
-    let cont = 0;
-    let dayStart = 0;
-    for (let i = 0; i < pagesOfDay.length; i += 2) {
-      const left = pagesOfDay[i] || [];
-      const right = pagesOfDay[i + 1] || [];
-      sheets.push({
-        day: page.day,
-        cont,
-        pageId: page.id,
-        left,
-        right,
-        startNo: dayStart,
-      });
-      dayStart += countItems(left) + countItems(right);
-      cont += 1;
-    }
+  let startNo = 0;
+  for (let i = 0; entries.length && i < pages.length; i += 2) {
+    const left = pages[i], right = pages[i + 1] || [];
+    const rows = [...left, ...right];
+    sheets.push({left, right, rows, startNo});
+    startNo += countItems(rows);
   }
   return sheets;
 }
 
-async function loadBook({ focusDay = "" } = {}) {
+async function loadBook({focusDay = "", focusId = null} = {}) {
+  const requestId = ++bookState.loadId;
+  ++bookState.searchId;
+  $("book-search-hit").classList.add("hidden");
   try {
     const data = await bridge.apiGet("journal", {});
-    const previousIndex = bookState.requestedSheet ?? bookState.sheet;
-    const previousSheet = bookState.sheets[previousIndex];
-    const wasAtEnd = previousIndex >= bookState.sheets.length - 1;
-    const pages = ((data && data.pages) || [])
-      .slice()
-      .sort((a, b) => String(a.day).localeCompare(String(b.day)));
-    bookState.pages = pages;
-    bookState.sheets = buildSheets();
-    bookState.enabled = !(data && data.enabled === false);
-    bookState.limit = (data && data.limit) || 8000;
-    bookState.injectDays = Number((data && data.inject_days) || 2);
-    bookState.recallDays = Number((data && data.recall_days) || 0);
-    $("guide-toggle").checked = bookState.enabled;
-    $("book-cover-sub").textContent = pages.length
-      ? `共 ${pages.length} 天 · ${bookState.sheets.length} 张`
-      : "还没写过";
-    const stats = (data && data.stats) || {};
-    bookState.scope = String((data && data.scope) || "all");
-    if (pages.length) {
-      const recall = bookState.recallDays
-        ? ` + 按关键词翻 ${bookState.recallDays} 天的旧记录`
-        : "";
-      $("guide-meta").textContent =
-        `共 ${stats.pages} 天 / ${stats.chars} 字 · 每轮读最近 ${bookState.injectDays} 天${recall}` +
-        ` · 上限 ${bookState.limit} 字`;
-      const edited = fmtDateTime(stats.latest_at);
-      $("book-updated").textContent = edited ? `最后编辑于 ${edited}` : "";
-      const target = focusDay
-        ? bookState.sheets.findLastIndex((sheet) => sheet.day === focusDay)
-        : -1;
-      if (target < 0) {
-        showSheet(bookState.open ? bookState.sheet : bookState.sheets.length - 1);
-      } else if (bookState.open && !wasAtEnd && previousSheet) {
-        const start = bookState.sheets.findIndex(
-          (sheet) => sheet.pageId === previousSheet.pageId && sheet.cont === previousSheet.cont,
-        );
-        showSheet(start < 0 ? previousIndex : start);
-        showSheet(target, true);
-      } else {
-        showSheet(target);
-        openBook();
-      }
+    if (requestId !== bookState.loadId) return;
+    if (!Array.isArray(data.entries)) throw new Error("请先重载教我说话插件。");
+    const previous = bookState.sheet;
+    const wasAtEnd = previous >= bookState.sheets.length - 1;
+    const anchor = bookState.sheets[previous]?.rows[0]?.id;
+    bookState.sheets = buildSheets(data.entries);
+    bookState.revision = data.revision;
+    bookState.scope = data.scope;
+    $("guide-toggle").checked = data.enabled;
+    const sheets = bookState.sheets;
+    const count = countItems(data.entries);
+    $("book-cover-sub").textContent = sheets.length ? '共 ' + count + ' 条 · ' + sheets.length + ' 张' : "还没写过";
+    $("guide-meta").textContent = '最近 ' + data.inject_entries + ' 条观察及其间的批注 · 最多召回 ' + data.recall_entries + ' 条旧观察 · 上限 ' + data.limit + ' 字';
+    const latest = data.entries.reduce((t,r) => Math.max(t,r.updated_at),0);
+    $("book-updated").textContent = latest ? '最后编辑于 ' + fmtDateTime(latest) : "";
+    if (!sheets.length) { renderEmptySheet(); return; }
+    const start = sheets.findIndex(sheet => sheet.rows.some(r => r.id === anchor));
+    const target = focusId ? sheets.findIndex(sheet => sheet.rows.some(r => r.id === focusId))
+      : focusDay ? sheets.findLastIndex(sheet => sheet.rows.some(r => r.day === focusDay)) : -1;
+    if (target < 0) {
+      showSheet(bookState.open ? (start < 0 ? previous : start) : sheets.length - 1);
+    } else if (bookState.open && !wasAtEnd && start >= 0) {
+      showSheet(start);
+      showSheet(target, true);
     } else {
-      renderEmptySheet();
-      $("book-updated").textContent = "";
+      showSheet(target);
+      openBook();
     }
   } catch (error) {
-    $("guide-meta").textContent =
-      "读取失败：" + ((error && error.message) || error);
+    if (requestId === bookState.loadId) $("guide-meta").textContent = "读取失败：" + error.message;
   }
 }
 
-function fillPage(side, items, sheet, pageNo, startNo) {
-  const no = $(`book-page-no-${side}`);
-  const day = $(`book-page-day-${side}`);
-  const list = $(`book-items-${side}`);
-  const foot = $(`book-page-foot-${side}`);
-  no.textContent = "";
-  // 当天的页码按「页」算：一张纸两页，左 1 右 2，下一张 3/4
-  const dayPageNo = sheet ? sheet.cont * 2 + (side === "left" ? 1 : 2) : 0;
-  day.textContent = sheet ? `${sheet.day}（${dayPageNo}）` : "";
+function basePage(side) {
+  return $("book-spread").querySelector(`:scope > .book-page.${side}`);
+}
+
+function fillPageInto(root, side, items, sheet, pageNo, startNo) {
+  const list = root.querySelector(".book-items");
+  const foot = root.querySelector(".book-page-foot");
   list.innerHTML = "";
   if (!items || !items.length) {
     const empty = document.createElement("div");
@@ -844,8 +750,10 @@ function fillPage(side, items, sheet, pageNo, startNo) {
     list.appendChild(empty);
   } else {
     let n = startNo || 0;
-    for (const entry of items) {
+    for (const entry of [...items.filter(r => r.kind !== "note"), ...items.filter(r => r.kind === "note")]) {
       const row = document.createElement("div");
+      row.dataset.entryDay = entry.day;
+      row.title = entry.day;
       if (entry.kind === "struck") {
         n += 1;
         row.className = "line item struck";
@@ -875,37 +783,338 @@ function fillPage(side, items, sheet, pageNo, startNo) {
   foot.textContent = sheet && pageNo ? `— ${pageNo} —` : "";
 }
 
+function fillPage(side, items, sheet, pageNo, startNo) {
+  fillPageInto(basePage(side), side, items, sheet, pageNo, startNo);
+}
+
+// 把第 index 张纸的左/右面画到 root 上
+function paintSide(root, side, index) {
+  const sheet = bookState.sheets[index];
+  if (!sheet) {
+    fillPageInto(root, side, [], null, 0);
+    return;
+  }
+  if (side === "left") {
+    fillPageInto(root, "left", sheet.left, sheet, index * 2 + 1, sheet.startNo);
+  } else {
+    fillPageInto(root, "right", sheet.right, sheet, index * 2 + 2,
+      (sheet.startNo || 0) + countItems(sheet.left));
+  }
+}
+
+// 一页独立的纸（翻页时贴在翻动的纸上），不带 id
+function pageNode(side, index) {
+  const page = basePage(side).cloneNode(true);
+  page.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
+  paintSide(page, side, index);
+  return page;
+}
+
 function renderEmptySheet() {
   clearFlip();
   bookState.sheet = 0;
-  bookState.pageId = null;
+  flipper.leftBase = 0;
+  flipper.rightBase = 0;
   fillPage("left", [], null, 0);
   fillPage("right", [], null, 0);
   $("book-indicator").textContent = "—";
 }
 
+/* ------------------------------------------------------------ 翻页引擎
+ * 每次点击立刻掀起一张独立的纸，不用等上一张落下：连点就是一沓纸接连翻过去。
+ * 纸以书脊为轴，被切成若干竖条串成一条可以弯曲的曲面：
+ *   - 掀起时外缘先离开纸面，书脊一侧后跟上；落下时书脊先贴住，外缘最后飘落；
+ *   - 每一条按自身倾角打光，翻起的纸在底下的页面上投下随高度变化的影子；
+ *   - 翻到一半反向点击，会抓住空中那张纸把它翻回去，而不是再起一张。
+ * 状态模型：flipper.leaves 按“书里的先后”排列（前面的纸更靠前），
+ *   p = 0 平躺在右边，p = 1 平躺在左边；任何时刻 p 沿数组单调不增，纸不会互相穿过。
+ *   leftBase / rightBase 是空中所有纸底下露出来的左页 / 右页。
+ */
+const FLIP_STRIPS = 16;
+const FLIP_DURATION = 860; // 单张纸翻过去的基准时长（ms），连翻时会自动加速
+const FLIP_PERSPECTIVE = 3200; // 与 .flip-leaf 的 CSS perspective 保持一致，用来精确判断正反面朝向
+const flipper = {
+  leaves: [],
+  leftBase: 0,
+  rightBase: 0,
+  raf: 0,
+  last: 0,
+  layer: null,
+  shadows: null,
+};
+
+const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const easeInOutSine = (t) => (1 - Math.cos(Math.PI * t)) / 2;
+// 弯曲量：前段外缘领先（正），后段外缘滞后（负），首尾为 0 保证纸能平躺
+const curlOf = (q) => 1.9 * Math.sin(Math.PI * q) * (1 - 1.5 * q);
+const SHADE_RGB = "62, 44, 18";
+
+function flipLayers() {
+  const spread = $("book-spread");
+  if (!flipper.layer || flipper.layer.parentNode !== spread) {
+    flipper.shadows = document.createElement("div");
+    flipper.shadows.className = "flip-shadows";
+    flipper.shadows.setAttribute("aria-hidden", "true");
+    flipper.layer = document.createElement("div");
+    flipper.layer.className = "flip-layer";
+    flipper.layer.setAttribute("aria-hidden", "true");
+    spread.append(flipper.shadows, flipper.layer);
+  }
+}
+
 function clearFlip() {
-  const flip = bookState.flip;
-  bookState.flip = null;
-  bookState.requestedSheet = null;
-  if (!flip) return;
-  flip.layer.remove();
-  for (const animation of flip.animations) animation.cancel();
+  cancelAnimationFrame(flipper.raf);
+  flipper.raf = 0;
+  for (const leaf of flipper.leaves) disposeLeaf(leaf);
+  flipper.leaves = [];
+}
+
+function disposeLeaf(leaf) {
+  leaf.el.remove();
+  leaf.shadow.remove();
+}
+
+function makeFace(page, offset, pageWidth, back, edge) {
+  const face = document.createElement("div");
+  face.className = `flip-face${back ? " back" : ""}${edge ? " edge" : ""}`;
+  const copy = page.cloneNode(true);
+  copy.style.width = `${pageWidth}px`;
+  copy.style.left = `${offset}px`;
+  const shade = document.createElement("div");
+  shade.className = "flip-shade";
+  face.append(copy, shade);
+  return { face, shade };
+}
+
+// front：纸躺在右边时朝上的那面（frontIdx 的右页）；back：翻到左边后朝上的那面（backIdx 的左页）
+function createLeaf(frontIdx, backIdx, p, dir, delay = 0) {
+  flipLayers();
+  const pageWidth = $("book-spread").clientWidth / 2;
+  const w = pageWidth / FLIP_STRIPS;
+  const el = document.createElement("div");
+  el.className = "flip-leaf";
+  const front = pageNode("right", frontIdx);
+  const back = pageNode("left", backIdx);
+  const strips = [];
+  for (let i = 0; i < FLIP_STRIPS; i += 1) {
+    const edge = i === FLIP_STRIPS - 1;
+    // 相邻竖条多叠 0.8px 盖住抗锯齿缝；无 preserve-3d 按 DOM 顺序从脊向外绘制，不会触发 3D BSP 切割断裂
+    const pad = edge ? 0 : 0.8;
+    const strip = document.createElement("div");
+    strip.className = "flip-strip";
+    strip.style.width = `${w + pad}px`;
+    const f = makeFace(front, -i * w, pageWidth, false, edge);
+    // 背面用 2D scaleX(-1) 水平翻转，需补上 pad 偏移让接缝精确对齐
+    const b = makeFace(back, -(FLIP_STRIPS - 1 - i) * w + pad, pageWidth, true, edge);
+    b.face.style.display = "none";
+    strip.append(f.face, b.face);
+    el.append(strip);
+    strips.push({
+      el: strip,
+      frontFace: f.face,
+      backFace: b.face,
+      frontShade: f.shade,
+      backShade: b.shade,
+      isFront: true,
+    });
+  }
+  const shadow = document.createElement("div");
+  shadow.className = "flip-shadow";
+  flipper.shadows.append(shadow);
+  flipper.layer.append(el);
+  const leaf = {
+    el, shadow, strips, pageWidth, w,
+    front: frontIdx, back: backIdx,
+    p, dir, s: dir, v: dir * (1000 / FLIP_DURATION), delay,
+    angles: new Float64Array(FLIP_STRIPS),
+  };
+  renderLeaf(leaf);
+  return leaf;
+}
+
+function renderLeaf(leaf) {
+  const n = FLIP_STRIPS;
+  const { p, s, w, angles } = leaf;
+  const base = Math.PI * easeInOutSine(p);
+  // s 在 ±1 之间平滑过渡：正向翻是“外缘领先”，反向翻镜像过来，中途反向不会跳形
+  const curl = ((1 + s) / 2) * curlOf(p) - ((1 - s) / 2) * curlOf(1 - p);
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    const f = (i + 0.5) / n;
+    const a = base + curl * (Math.pow(f, 1.15) - 0.3);
+    angles[i] = a < 0 ? 0 : a > Math.PI ? Math.PI : a;
+    sum += angles[i];
+  }
+  const shadeFront = (a) => Math.min(0.42, 0.3 * (1 - Math.cos(a)) + 0.04 * Math.sin(a * 2));
+  const shadeBack = (a) => Math.min(0.42, 0.3 * (1 + Math.cos(a)) + 0.04 * Math.sin(a * 2) * -1);
+  let x = 0;
+  let z = 0;
+  for (let i = 0; i < n; i += 1) {
+    const a = angles[i];
+    const cosA = Math.cos(a);
+    const sinA = Math.sin(a);
+    const xm = x + 0.5 * w * cosA;
+    const zm = z + 0.5 * w * sinA;
+    // 用解析法判断这一条正面还是背面朝向镜头（替代 backface-visibility，彻底避免浏览器 3D 背面剔除错漏）
+    const isFront = xm * sinA + (FLIP_PERSPECTIVE - zm) * cosA >= 0;
+    const strip = leaf.strips[i];
+    if (strip.isFront !== isFront) {
+      strip.isFront = isFront;
+      strip.frontFace.style.display = isFront ? "" : "none";
+      strip.backFace.style.display = isFront ? "none" : "";
+    }
+    strip.el.style.transform = `translate3d(${x.toFixed(2)}px, 0, ${z.toFixed(2)}px) rotateY(${(-a).toFixed(4)}rad)`;
+    // 用竖条两端的倾角做渐变，光影连续，不会一条一条地跳
+    const a0 = i ? (angles[i - 1] + a) / 2 : a;
+    const a1 = i < n - 1 ? (angles[i + 1] + a) / 2 : a;
+    if (isFront) {
+      strip.frontShade.style.background =
+        `linear-gradient(90deg, rgba(${SHADE_RGB}, ${shadeFront(a0).toFixed(3)}), rgba(${SHADE_RGB}, ${shadeFront(a1).toFixed(3)}))`;
+    } else {
+      strip.backShade.style.background =
+        `linear-gradient(90deg, rgba(${SHADE_RGB}, ${shadeBack(a1).toFixed(3)}), rgba(${SHADE_RGB}, ${shadeBack(a0).toFixed(3)}))`;
+    }
+    x += w * cosA;
+    z += w * sinA;
+  }
+  // 越接近竖直的纸越靠上：右半边是先翻的压着后翻的，左半边是后落的压着先落的
+  const mean = sum / n;
+  leaf.el.style.zIndex = String(1000 - Math.round(Math.abs(mean - Math.PI / 2) * 200));
+
+  // 投影：落在纸外缘之外，纸抬得越高影子越宽越淡
+  const lift = Math.max(z, leaf.pageWidth * Math.sin(mean) * 0.6);
+  const strength = Math.min(1, lift / 140) * 0.3;
+  const spread = 14 + lift * 0.28;
+  const sh = leaf.shadow.style;
+  if (strength < 0.01) {
+    sh.opacity = "0";
+    return;
+  }
+  sh.opacity = "1";
+  const reach = Math.abs(x);
+  const dirDeg = x >= 0 ? 90 : 270;
+  sh.width = `${(reach + spread).toFixed(1)}px`;
+  sh.left = `${(x >= 0 ? leaf.pageWidth : leaf.pageWidth - reach - spread).toFixed(1)}px`;
+  sh.background =
+    `linear-gradient(${dirDeg}deg, rgba(${SHADE_RGB}, ${(strength * 0.55).toFixed(3)}) 0, ` +
+    `rgba(${SHADE_RGB}, ${strength.toFixed(3)}) ${reach.toFixed(1)}px, ` +
+    `rgba(${SHADE_RGB}, 0) ${(reach + spread).toFixed(1)}px)`;
+}
+
+function paintBases() {
+  paintSide(basePage("left"), "left", flipper.leftBase);
+  paintSide(basePage("right"), "right", flipper.rightBase);
+}
+
+function flipTick(now) {
+  const dt = Math.min(0.05, Math.max(0, (now - flipper.last) / 1000));
+  flipper.last = now;
+  const leaves = flipper.leaves;
+  // 空中纸越多翻得越快，连点时像捻着书页一路翻过去
+  const speed = (1000 / FLIP_DURATION) * Math.min(2.4, 1 + 0.35 * (leaves.length - 1));
+  const kv = 1 - Math.exp(-dt * 14);
+  const ks = 1 - Math.exp(-dt * 9);
+  for (const leaf of leaves) {
+    leaf.s += (leaf.dir - leaf.s) * ks;
+    if (leaf.delay > 0) {
+      leaf.delay -= dt;
+      continue;
+    }
+    leaf.v += (leaf.dir * speed - leaf.v) * kv;
+    const p = leaf.p + leaf.v * dt;
+    if (p <= 0 || p >= 1) leaf.v = 0;
+    leaf.p = clamp01(p);
+  }
+  // 后面的纸不能越过前面的纸
+  for (let i = 1; i < leaves.length; i += 1) {
+    if (leaves[i].p > leaves[i - 1].p) leaves[i].p = leaves[i - 1].p;
+  }
+  let landed = false;
+  while (leaves.length && leaves[0].dir > 0 && leaves[0].p >= 1) {
+    const leaf = leaves.shift();
+    flipper.leftBase = leaf.back;
+    disposeLeaf(leaf);
+    landed = true;
+  }
+  while (leaves.length && leaves[leaves.length - 1].dir < 0 && leaves[leaves.length - 1].p <= 0) {
+    const leaf = leaves.pop();
+    flipper.rightBase = leaf.front;
+    disposeLeaf(leaf);
+    landed = true;
+  }
+  if (landed) paintBases();
+  for (const leaf of leaves) renderLeaf(leaf);
+  flipper.raf = leaves.length ? requestAnimationFrame(flipTick) : 0;
+}
+
+function startFlipLoop() {
+  if (flipper.raf) return;
+  flipper.last = performance.now();
+  flipper.raf = requestAnimationFrame(flipTick);
+}
+
+function setCurrent(index) {
+  const sheet = bookState.sheets[index];
+  if (!sheet) return;
+  bookState.sheet = index;
+  $("book-indicator").textContent = "第 " + (index * 2 + 1) + "–" + (index * 2 + 2) + " 页";
 }
 
 function applySheet(index) {
-  const sheet = bookState.sheets[index];
-  bookState.sheet = index;
-  bookState.pageId = sheet.pageId;
-  fillPage("left", sheet.left, sheet, index * 2 + 1, sheet.startNo);
-  fillPage(
-    "right",
-    sheet.right,
-    sheet,
-    index * 2 + 2,
-    (sheet.startNo || 0) + countItems(sheet.left),
-  );
-  $("book-indicator").textContent = `${sheet.day}（${sheet.cont * 2 + 1}–${sheet.cont * 2 + 2}）`;
+  flipper.leftBase = index;
+  flipper.rightBase = index;
+  paintBases();
+  setCurrent(index);
+}
+
+function flipForward(delay = 0) {
+  const leaves = flipper.leaves;
+  const back = leaves.find((leaf) => leaf.dir < 0);
+  if (back) {
+    // 正在往回落的纸：抓住它重新翻过去
+    back.dir = 1;
+    back.delay = 0;
+    setCurrent(back.back);
+    startFlipLoop();
+    return true;
+  }
+  const next = flipper.rightBase + 1;
+  if (next >= bookState.sheets.length) return false;
+  const leaf = createLeaf(flipper.rightBase, next, 0, 1, delay);
+  leaves.push(leaf);
+  flipper.rightBase = next;
+  paintSide(basePage("right"), "right", next);
+  setCurrent(next);
+  startFlipLoop();
+  return true;
+}
+
+function flipBackward(delay = 0) {
+  const leaves = flipper.leaves;
+  let fwd = null;
+  for (let i = leaves.length - 1; i >= 0; i -= 1) {
+    if (leaves[i].dir > 0) {
+      fwd = leaves[i];
+      break;
+    }
+  }
+  if (fwd) {
+    fwd.dir = -1;
+    fwd.delay = 0;
+    setCurrent(fwd.front);
+    startFlipLoop();
+    return true;
+  }
+  const prev = flipper.leftBase - 1;
+  if (prev < 0) return false;
+  const leaf = createLeaf(prev, flipper.leftBase, 1, -1, delay);
+  leaves.unshift(leaf);
+  flipper.leftBase = prev;
+  paintSide(basePage("left"), "left", prev);
+  setCurrent(prev);
+  startFlipLoop();
+  return true;
 }
 
 function showSheet(index, animate = false) {
@@ -915,91 +1124,42 @@ function showSheet(index, animate = false) {
     return;
   }
   const target = Math.max(0, Math.min(index, total - 1));
-  const spread = $("book-spread");
-  if (!animate || !bookState.open || matchMedia("(prefers-reduced-motion: reduce)").matches ||
-      typeof spread.animate !== "function") {
+  if (!animate || !bookState.open || reducedMotion()) {
     clearFlip();
     applySheet(target);
     return;
   }
-  if (bookState.flip) {
-    bookState.requestedSheet = target;
-    return;
-  }
-  if (target === bookState.sheet) return;
-
-  const forward = target > bookState.sheet;
-  const left = spread.querySelector(":scope > .book-page.left");
-  const right = spread.querySelector(":scope > .book-page.right");
-  const source = forward ? right : left;
-  const destination = forward ? left : right;
-  const oldDestination = destination.innerHTML;
-  const front = source.cloneNode(true);
-  applySheet(target);
-  const back = destination.cloneNode(true);
-  destination.innerHTML = oldDestination;
-
-  const layer = document.createElement("div");
-  layer.className = `flip-sheet ${forward ? "fwd" : "backward"}`;
-  layer.setAttribute("aria-hidden", "true");
-  const count = 12;
-  const pageWidth = spread.clientWidth / 2;
-  const stripWidth = pageWidth / count;
-  const side = forward ? 1 : -1;
-  const frames = Array.from({ length: count }, () => []);
-  // Adjacent strips share a hinge. A changing bend makes the edge lead the spine.
-  for (let frame = 0; frame <= 24; frame += 1) {
-    const progress = frame / 24;
-    let x = 0;
-    let z = 0;
-    for (let strip = 0; strip < count; strip += 1) {
-      const turn = Math.PI * progress + Math.sin(Math.PI * progress) * 0.86 *
-        ((strip + 0.5) / count - 0.38);
-      frames[strip].push({
-        transform: `translate3d(${x}px, 0, ${z}px) rotateY(${-side * turn}rad)`,
-      });
-      x += side * stripWidth * Math.cos(turn);
-      z += stripWidth * Math.sin(turn);
+  const diff = target - bookState.sheet;
+  if (!diff) return;
+  if (Math.abs(diff) <= 4) {
+    // 近处：一张张错开翻过去
+    for (let i = 0; i < Math.abs(diff); i += 1) {
+      if (diff > 0) flipForward(i * 0.09);
+      else flipBackward(i * 0.09);
     }
+    return;
   }
-
-  const face = (page, index, reverse = false) => {
-    const panel = document.createElement("div");
-    panel.className = reverse ? "flip-face reverse" : "flip-face";
-    const copy = page.cloneNode(true);
-    copy.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
-    copy.style.width = `${pageWidth}px`;
-    copy.style.left = `${-index * stripWidth}px`;
-    panel.append(copy);
-    return panel;
-  };
-  const strips = frames.map((_, i) => {
-    const strip = document.createElement("div");
-    strip.className = "flip-strip";
-    strip.style.width = `${stripWidth + 0.45}px`;
-    const index = forward ? i : count - 1 - i;
-    strip.append(face(front, index), face(back, count - 1 - index, true));
-    layer.append(strip);
-    return strip;
-  });
-  spread.append(layer);
-  const options = { duration: 680, easing: "cubic-bezier(.42, .05, .24, 1)", fill: "both" };
-  const animations = strips.map((strip, i) => strip.animate(frames[i], options));
-  const flip = { layer, animations };
-  bookState.flip = flip;
-  Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
-    if (bookState.flip !== flip) return;
-    const next = bookState.requestedSheet;
-    clearFlip();
-    applySheet(target);
-    if (next !== null && next !== target && bookState.open) showSheet(next, true);
-  });
+  // 远跳：先落定，再用一张纸直接翻到目标页
+  const from = bookState.sheet;
+  clearFlip();
+  applySheet(from);
+  if (diff > 0) {
+    flipper.leaves.push(createLeaf(from, target, 0, 1));
+    flipper.rightBase = target;
+    paintSide(basePage("right"), "right", target);
+  } else {
+    flipper.leaves.push(createLeaf(target, from, 1, -1));
+    flipper.leftBase = target;
+    paintSide(basePage("left"), "left", target);
+  }
+  setCurrent(target);
+  startFlipLoop();
 }
 
 // 封面背面印第一页：把左页当前内容抄到封面的背面去
 function syncCoverBack() {
   const back = document.querySelector(".book-cover .cover-face.back");
-  const left = $("book-spread").querySelector(":scope > .book-page.left");
+  const left = basePage("left");
   if (!back || !left) return;
   back.innerHTML = "";
   const page = document.createElement("div");
@@ -1022,8 +1182,7 @@ function openBook() {
 
 function closeBook() {
   if (!bookState.open) return;
-  const target = bookState.requestedSheet ?? bookState.sheet;
-  showSheet(target);
+  showSheet(bookState.sheet);
   syncCoverBack();
   bookState.open = false;
   $("book").classList.add("closing");
@@ -1034,23 +1193,22 @@ function closeBook() {
   }, 900);
 }
 
-async function stepSheet(dir) {
+function stepSheet(dir) {
   if (!bookState.open) {
     openBook();
     return;
   }
-  if (!bookState.sheets.length) return;
-  const next = (bookState.requestedSheet ?? bookState.sheet) + dir;
-  if (next < 0 || next >= bookState.sheets.length) {
-    toast(dir > 0 ? "已经是最后一张纸了" : "已经是第一张纸了");
-    return;
+  const total = bookState.sheets.length;
+  if (!total) return;
+  let ok;
+  if (reducedMotion()) {
+    const next = bookState.sheet + dir;
+    ok = next >= 0 && next < total;
+    if (ok) showSheet(next);
+  } else {
+    ok = dir > 0 ? flipForward() : flipBackward();
   }
-  showSheet(next, true);
-}
-
-function currentPage() {
-  if (!bookState.pageId) return null;
-  return bookState.pages.find((p) => p.id === bookState.pageId) || null;
+  if (!ok) toast(dir > 0 ? "已经是最后一张纸了" : "已经是第一张纸了");
 }
 
 async function searchBook() {
@@ -1073,51 +1231,31 @@ async function searchBook() {
         return;
       }
 
-      let index = bookState.sheets.findIndex((sheet) => sheet.day === day);
-      const alreadyLoaded = index >= 0;
-      if (!alreadyLoaded) {
-        const data = await bridge.apiGet("journal/page", { day });
-        if (searchId !== bookState.searchId) return;
-        index = bookState.sheets.findIndex((sheet) => sheet.day === day);
-        if (index < 0 && data?.page?.day === day) {
-          bookState.pages.push({ ...data.page, rows: data.rows });
-          bookState.pages.sort((a, b) => a.day.localeCompare(b.day));
-          bookState.sheets = buildSheets();
-          index = bookState.sheets.findIndex((sheet) => sheet.day === day);
-          $("book-cover-sub").textContent = `共 ${bookState.pages.length} 天 · ${bookState.sheets.length} 张`;
-        }
-      }
+      const index = bookState.sheets.findIndex(sheet => sheet.rows.some(r => r.day === day));
       if (index < 0) {
         hitBox.classList.remove("hidden");
         hitBox.append(el("span", "book-hit-empty", `${day} 没有记录`));
         return;
       }
-      showSheet(index, alreadyLoaded && bookState.open);
+      showSheet(index, bookState.open);
       openBook();
+      const matched = bookState.sheets[index].rows.filter(r => r.day === day);
+      hitBox.classList.remove("hidden");
+      hitBox.append(el("span", "book-hit-label", day + " · " + matched[0].text.slice(0, 40)));
       return;
     }
 
     const data = await bridge.apiGet("journal/search", { q: word });
     if (searchId !== bookState.searchId) return;
-    const pages = (data && data.pages) || [];
+    const entries = data.entries || [];
     hitBox.classList.remove("hidden");
-    if (!pages.length) {
-      hitBox.append(el("span", "book-hit-empty", `书里没有和「${word}」相关的记录`));
-      return;
-    }
-    hitBox.append(el("span", "book-hit-label", `找到 ${pages.length} 天：`));
-    for (const page of pages) {
-      const btn = el(
-        "button",
-        "book-hit",
-        `${page.day}（${page.chars} 字）${page.excerpt.slice(0, 18)}`,
-      );
+    if (!entries.length) hitBox.append(el("span", "book-hit-empty", "没有匹配的观察条目。"));
+    for (const entry of entries) {
+      const btn = el("button", "book-hit", entry.day + " · " + entry.text.slice(0, 24));
       btn.type = "button";
       btn.addEventListener("click", () => {
-        const idx = bookState.sheets.findIndex((s) => s.pageId === page.id && s.cont === 0);
-        if (idx < 0) return;
-        openBook();
-        showSheet(idx, true);
+        const index = bookState.sheets.findIndex(sheet => sheet.rows.some(r => r.id === entry.id));
+        if (index >= 0) { showSheet(index, bookState.open); openBook(); }
       });
       hitBox.append(btn);
     }
@@ -1127,105 +1265,74 @@ async function searchBook() {
   }
 }
 
-// Keep the original fields for detecting unsaved changes when switching dates.
-const editorState = { day: "", text: "", notes: "" };
+let spreadEdit = null;
 
-function paintEditor(day, page) {
-  bookState.editing = page || null;
-  const entries = [];
-  const notes = [];
-  for (const row of pageItems(page)) {
-    if (row.kind === "note") {
-      notes.push(row.text);
-      continue;
-    }
-    const body = row.kind === "struck" ? `[strike]${row.text}[/strike]` : row.text;
-    entries.push(`${entries.length + 1}. ${body}`);
+function addEditorRow(container, entry) {
+  const field = el("div", "field");
+  const header = el("div", "guide-row-head");
+  const type = document.createElement("select");
+  type.setAttribute("aria-label", "记录类型");
+  for (const [value, label] of [["item","条目"],["struck","划掉"],["note","批注"]]) {
+    type.add(new Option(label,value));
   }
-  editorState.day = day;
-  editorState.text = entries.join("\n");
-  editorState.notes = notes.join("\n");
-  $("guide-day").value = day;
-  $("guide-dlg-title").textContent = page ? `编辑 ${day}` : `写 ${day}`;
-  $("guide-text").value = editorState.text;
-  $("guide-notes").value = editorState.notes;
-  $("guide-err").textContent = page ? "" : "这一天还没写过，保存会新建这一页。";
-  updateGuideCount();
+  type.value = entry.kind;
+  const remove = el("button", "act danger", "移除");
+  remove.type = "button";
+  remove.onclick = () => field.remove();
+  header.append(type, el("span", "hint", entry.day || "新增"), remove);
+  const input = document.createElement("textarea");
+  input.rows = 2;
+  input.value = entry.text;
+  input.setAttribute("aria-label", "记录内容");
+  if (entry.id) field.dataset.id = entry.id;
+  field.append(header,input);
+  container.append(field);
+  return input;
 }
 
-// 换到某一天：优先用已加载的页；书里没有就按日期问后端（超过 200 页时列表里可能没有）
-async function applyDayToEditor(day) {
-  let page = bookState.pages.find((p) => p.day === day) || null;
-  if (!page) {
-    try {
-      const data = await bridge.apiGet("journal/page", { day });
-      page = data?.page ? { ...data.page, rows: data.rows } : null;
-    } catch (error) {
-      page = null;
-    }
+function openPageEditor() {
+  if (bookState.scope === "interaction") { toast("请先切换到「所有」再编辑书页。",true); return; }
+  if (bookState.revision == null) return;
+  const index = bookState.sheet;
+  if (bookState.open) showSheet(index);
+  const sheet = bookState.sheets[index] || {left:[],right:[],rows:[]};
+  spreadEdit = {ids:sheet.rows.map(r => r.id), revision:bookState.revision};
+  $("guide-dlg-title").textContent = "编辑第 " + (2*index+1) + "–" + (2*index+2) + " 页";
+  for (const side of ["left","right"]) {
+    const container = $("guide-" + side);
+    container.replaceChildren();
+    for (const entry of sheet[side]) addEditorRow(container,entry);
   }
-  if (editorState.day !== day) return; // 期间又换了一天，放弃这次绘制
-  paintEditor(day, page);
-}
-
-async function openPageEditor(page) {
-  const day = (page && page.day) || todayStr();
-  editorState.day = day; // 占位，避免第一次 await 被当成"又换了一天"
-  paintEditor(day, page || null);
   $("guide-err").textContent = "";
   $("guide-mask").classList.remove("hidden");
-  setTimeout(() => $("guide-text").focus(), 30);
-  if (!page) await applyDayToEditor(day);
-}
-
-// 在弹窗里换日期 → 立刻把那天已有的内容读出来（别让人在 A 天的内容上选 B 天再保存）
-function bindGuideDayPicker() {
-  const input = $("guide-day");
-  if (!input || input.dataset.bound === "1") return;
-  input.dataset.bound = "1";
-  input.addEventListener("change", () => {
-    const day = input.value || todayStr();
-    if ($("guide-text").value !== editorState.text || $("guide-notes").value !== editorState.notes) {
-      input.value = editorState.day; // 回退日期，避免静默丢掉未保存的改动
-      $("guide-err").textContent = "当前有未保存的修改，先保存再切换日期。";
-      return;
-    }
-    editorState.day = day;
-    applyDayToEditor(day);
-  });
 }
 
 function closeGuideEditor() {
   $("guide-mask").classList.add("hidden");
-  bookState.editing = null;
-}
-
-function updateGuideCount() {
-  const text = $("guide-text").value || "";
-  const notes = $("guide-notes").value || "";
-  $("guide-count").textContent = `${text.length + notes.length} 字 · ${parseLines(text).length} 条`;
+  spreadEdit = null;
 }
 
 async function savePage() {
-  if ($("guide-save").disabled) return;
-  const content = $("guide-text").value.trim();
-  const notes = $("guide-notes").value.trim();
-  const day = $("guide-day").value || todayStr();
+  if ($("guide-save").disabled || !spreadEdit) return;
+  const entries = [];
+  for (const field of $("guide-mask").querySelectorAll(".guide-editor-rows > .field")) {
+    const kind = field.querySelector("select").value;
+    const value = field.querySelector("textarea").value.trim();
+    if (!value) { $("guide-err").textContent = "内容为空，请填写文字或移除这一行。"; return; }
+    const lines = kind === "note" ? value.split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [value];
+    for (const [index,text] of lines.entries()) {
+      entries.push({id:index === 0 && field.dataset.id ? Number(field.dataset.id) : null,kind,text});
+    }
+  }
   $("guide-save").disabled = true;
   try {
-    await bridge.apiPost("journal/save", { day, content, notes });
+    const result = await bridge.apiPost("journal/save", {...spreadEdit,entries});
     closeGuideEditor();
     toast("已保存");
-    await loadBook();
-    if (!bookState.open) openBook();
-    const idx = bookState.sheets.findIndex((s) => s.day === day && s.cont === 0);
-    if (idx >= 0) await showSheet(idx);
+    await loadBook({focusId:result.ids?.[0]});
   } catch (error) {
-    $("guide-err").textContent =
-      (error && error.message) || "保存失败，请检查内容后重试。";
-  } finally {
-    $("guide-save").disabled = false;
-  }
+    $("guide-err").textContent = error.message || "保存失败";
+  } finally { $("guide-save").disabled = false; }
 }
 
 async function toggleGuideInject(event) {
@@ -1312,11 +1419,10 @@ async function main() {
   });
   $("book-prev").addEventListener("click", () => stepSheet(-1));
   $("book-next").addEventListener("click", () => stepSheet(1));
-  $("book-edit").addEventListener("click", () => {
-    const page = currentPage();
-    openPageEditor(page || null);
-  });
-  bindGuideDayPicker();
+  $("book-edit").addEventListener("click", openPageEditor);
+  for (const side of ["left","right"]) {
+    $("guide-add-" + side).onclick = () => addEditorRow($("guide-" + side),{kind:"item",text:""}).focus();
+  }
   $("book-review").addEventListener("click", askWriteToday);
   $("confirm-ok").addEventListener("click", runConfirm);
   $("confirm-cancel").addEventListener("click", closeConfirm);
@@ -1325,31 +1431,28 @@ async function main() {
     if (event.target === $("confirm-mask")) closeConfirm();
   });
   $("book-stage").addEventListener("click", (event) => {
-    if (event.target.closest(".book")) return;
+    // 翻页会同步重绘被点的那一页，冒泡到这里时 event.target 可能已脱离 DOM，
+    // 所以用派发时记录的路径判断是不是点在书上
+    if (event.composedPath().includes($("book"))) return;
     closeBook();
   });
-  let clickTimer = null;
-  document.querySelectorAll(".book-page").forEach((el2) => {
+  // 点一下翻一页，连点就连续翻；编辑走工具栏的「编辑」按钮
+  $("book-spread").addEventListener("mousedown", (event) => {
+    if (event.detail > 1) event.preventDefault(); // 连点时别把文字选中
+  });
+  $("book-spread").querySelectorAll(":scope > .book-page").forEach((el2) => {
     const dir = el2.classList.contains("left") ? -1 : 1;
-    el2.addEventListener("click", () => {
-      clearTimeout(clickTimer);
-      clickTimer = setTimeout(() => {
-        if (!bookState.open) {
-          openBook();
-          return;
-        }
-        if (dir < 0 && bookState.sheet === 0) {
-          closeBook();
-          return;
-        }
-        stepSheet(dir);
-      }, 220);
-    });
-    el2.addEventListener("dblclick", () => {
-      clearTimeout(clickTimer);
-      const page = currentPage();
-      if (!page) return;
-      openPageEditor(page);
+    el2.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!bookState.open) {
+        openBook();
+        return;
+      }
+      if (dir < 0 && bookState.sheet === 0 && !flipper.leaves.length) {
+        closeBook();
+        return;
+      }
+      stepSheet(dir);
     });
   });
   $("book-search").addEventListener("input", () => {
@@ -1369,8 +1472,6 @@ async function main() {
   });
   $("guide-cancel").addEventListener("click", closeGuideEditor);
   $("guide-save").addEventListener("click", savePage);
-  $("guide-text").addEventListener("input", updateGuideCount);
-  $("guide-notes").addEventListener("input", updateGuideCount);
   $("cfg-btn").addEventListener("click", openConfig);
   $("cfg-close").addEventListener("click", closeConfig);
   $("cfg-cancel").addEventListener("click", closeConfig);

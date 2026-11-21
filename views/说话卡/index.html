@@ -6,7 +6,7 @@
     <meta http-equiv="pragma" content="no-cache" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>说话卡面板</title>
-    <link rel="stylesheet" href="./style.css?v=4.6.8" />
+    <link rel="stylesheet" href="./style.css?v=4.8.2" />
   </head>
   <body>
     <header class="top">
@@ -25,18 +25,12 @@
         <div class="book" id="book" role="button" tabindex="0" aria-label="点击翻开指南书">
           <div class="book-spread" id="book-spread">
             <div class="book-page left">
-                                      <div class="book-page-head">
-                                        <span class="book-page-no" id="book-page-no-left">—</span>
-                                        <span class="book-page-day" id="book-page-day-left"></span>
-                                      </div>
+                                      <div class="book-page-head" aria-hidden="true"></div>
                                       <div class="book-items" id="book-items-left"><div class="book-empty"></div></div>
                                       <div class="book-page-foot" id="book-page-foot-left"></div>
                                     </div>
             <div class="book-page right">
-                                      <div class="book-page-head">
-                                        <span class="book-page-no" id="book-page-no-right">—</span>
-                                        <span class="book-page-day" id="book-page-day-right"></span>
-                                      </div>
+                                      <div class="book-page-head" aria-hidden="true"></div>
                                       <div class="book-items" id="book-items-right"><div class="book-empty"></div></div>
                                       <div class="book-page-foot" id="book-page-foot-right"></div>
                                     </div>
@@ -71,7 +65,7 @@
           <span class="switch-text">注入</span>
         </label>
       </div>
-      <p class="guide-meta" id="guide-meta">每轮只读最近几页，不是整本。</p>
+      <p class="guide-meta" id="guide-meta">读取指南中…</p>
       <div id="book-search-hit" class="book-search-hit hidden" aria-live="polite"></div>
     </section>
 
@@ -193,19 +187,10 @@
           <button id="guide-dlg-close" class="icon" title="关闭">✕</button>
         </div>
         <div class="dialog-body">
-          <label class="field">
-            <span>日期 <em>这一页记在哪天；同一天会覆盖那一页</em></span>
-            <input id="guide-day" type="date" />
-          </label>
-          <label class="field">
-            <span>条目</span>
-            <textarea id="guide-text" rows="10" placeholder="1. 我发现人聊天经常不把话说完，留半句等我接，我别急着替人补完。&#10;2. 我以前一上来就想总结成三点，其实人不会这么说话，我以后先顺着说一句。&#10;3. 人被夸第一反应往往是“哪有”，然后才笑，我别急着谦虚。"></textarea>
-          </label>
-          <label class="field">
-            <span>页尾批注 <em>可写多行</em></span>
-            <textarea id="guide-notes" rows="3"></textarea>
-          </label>
-          <p class="hint" id="guide-count">0 字</p>
+          <section><h3>左页</h3><div id="guide-left" class="guide-editor-rows"></div>
+            <button type="button" class="ghost" id="guide-add-left">＋ 添加一行</button></section>
+          <section><h3>右页</h3><div id="guide-right" class="guide-editor-rows"></div>
+            <button type="button" class="ghost" id="guide-add-right">＋ 添加一行</button></section>
         </div>
         <div class="dialog-foot">
           <span id="guide-err" class="err"></span>
@@ -232,6 +217,6 @@
       </div>
     </div>
 
-    <script type="module" src="./app.v5402.js?v=5407"></script>
+    <script type="module" src="./app.v5402.js?v=5413"></script>
   </body>
 </html>

@@ -189,13 +189,13 @@
     "description": "每轮读书字数上限",
     "type": "int",
     "default": 8000,
-    "hint": "每轮只读最近几页（+ 关键词翻到的旧页），不是整本；超预算时先保最近的页。"
+    "hint": "最近观察优先，超预算时按完整条目取舍。"
   },
-  "guide_inject_days": {
-    "description": "每轮读最近几天的记录",
+  "guide_inject_entries": {
+    "description": "每轮读最近几条观察",
     "type": "int",
-    "default": 2,
-    "hint": "按「页」取最近 N 页（一页=一天）。中间几天没聊，最近两页就是更早的日子。"
+    "default": 30,
+    "hint": "最近 N 条有效观察及其间的批注。"
   },
   "guide_day_cut_hour": {
     "description": "几点算新的一天",
@@ -228,7 +228,7 @@
     "hint": "用 , 号分隔"
   },
   "guide_recall_threshold": {
-    "description": "语义兜底召回相似度阈值",
+    "description": "外部异步接口的语义召回阈值",
     "type": "float",
     "default": 0.45,
     "hint": "相似度低于它就不注入；越高越保守。"
@@ -258,28 +258,28 @@
     "hint": "仅当“只允许主人在场”开启时有效：允许群聊中由管理员会话触发写入。"
   },
   "guide_review_enabled": {
-    "description": "每天定时写今天这一页",
+    "description": "每天定时追加观察",
     "type": "bool",
     "default": true,
-    "hint": "到点后按当天对话写今天这一页（已有则覆盖），不做整本重写。"
+    "hint": "按日界线读取当天可见聊天，分批提炼后追加新观察。"
   },
   "guide_review_max_input": {
-    "description": "当天对话素材字数上限",
+    "description": "每批聊天素材字数",
     "type": "int",
     "default": 6000,
-    "hint": "从 AstrBot 会话库抽当天对话，超过就截断。"
+    "hint": "每批最多送入的聊天字数，超过时继续处理下一批。"
   },
   "guide_review_hour": {
     "description": "定时写今天的时间（整点 0-23）",
     "type": "int",
     "default": 21,
-    "hint": "每天到这个整点后写一页今天；0=凌晨，23=晚上11点。"
+    "hint": "每天到这个整点后追加观察；0=凌晨，23=晚上11点。"
   },
-  "guide_recall_days": {
-    "description": "按关键词最多翻几天的旧记录",
+  "guide_recall_entries": {
+    "description": "最多召回几条旧观察",
     "type": "int",
-    "default": 1,
-    "hint": "以「天」为单位：默认最近 2 天 + 按关键词再翻 1 天；0 = 不回忆。"
+    "default": 3,
+    "hint": "从更早的有效观察中匹配，0 表示关闭。"
   },
   "guide_record_scope": {
     "description": "记录程度",

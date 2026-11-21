@@ -479,7 +479,7 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
 .book-stage { padding: 14px 0 6px; cursor: pointer; }
 .book-stage .book { cursor: pointer; }
 /* ---------- 书体：宽度固定为展开尺寸，书脊永远在中线 ---------- */
-.book-stage { padding: 56px 0 44px; overflow-x: auto; overflow-y: visible; }
+.book-stage { padding: 72px 0 68px; overflow-x: auto; overflow-y: hidden; }
 .book {
   --book-paper: repeating-linear-gradient(
     0deg, transparent 0 26px, rgba(150, 120, 70, 0.16) 26px 27px
@@ -492,27 +492,32 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
 }
 .book.open { transform: none; cursor: default; }
 
-/* Two stacks of paper above the edge of the back cover. */
 .book::before, .book::after {
   content: "";
   position: absolute;
-  top: calc(100% - 2px);
-  width: 50%;
-  height: 15px;
+  z-index: -1;
+  top: calc(100% - 10px);
+  width: calc(50% - 1px);
+  height: 18px;
   pointer-events: none;
   background:
-    linear-gradient(180deg, transparent 0 76%, #3a4057 77%, #232a40 92%),
-    linear-gradient(90deg, rgba(111, 79, 38, .26), transparent 13% 88%, rgba(131, 103, 65, .2)),
-    repeating-linear-gradient(177deg, #e9dbbd 0 2px, #c9b58e 2.5px 3px, #f4ead2 3.5px 5px);
-  border-radius: 0 0 11px 5px;
-  box-shadow: 0 10px 17px -7px rgba(52, 43, 31, .43);
+    radial-gradient(ellipse 34px 130% at var(--spine) 100%, rgba(98, 79, 58, .20), transparent),
+    linear-gradient(var(--across), transparent 35%, rgba(255, 252, 240, .32) 73%, transparent),
+    linear-gradient(to top, #d9ccb3, #ece2ce 2px, #d3c5ad 2.8px, #f2e9d8 3.8px,
+      #f1e8d6 5px, #ded1b8 5.8px, #f7efdf 6.8px, #ece2ce 9px);
+  box-shadow: 0 1.5px 0 .4px #454b60, 0 5px 7px -4px rgba(54, 45, 35, .22);
 }
-.book::before { right: 0; transform: skewX(-11deg); transform-origin: top right; }
+.book::before {
+  --spine: left;
+  --across: to right;
+  right: 1px;
+  border-radius: 0 0 13px 20px / 0 0 11px 3px;
+}
 .book::after {
-  left: 0;
-  border-radius: 0 0 5px 11px;
-  transform: skewX(11deg);
-  transform-origin: top left;
+  --spine: right;
+  --across: to left;
+  left: 1px;
+  border-radius: 0 0 20px 13px / 0 0 3px 11px;
   opacity: 0;
   transition: opacity .2s ease;
 }
@@ -525,13 +530,13 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   border-radius: 12px;
   background: #e6d5b5;
   border: 1px solid #d8c9a8;
-  box-shadow: 0 15px 28px rgba(90, 70, 30, 0.19);
+  box-shadow: 0 16px 22px -10px rgba(68, 54, 37, .20);
   clip-path: inset(-40px -40px -40px 50%);
   transition: clip-path 0s;
   pointer-events: none;
 }
 .book.open .book-spread {
-  clip-path: inset(-180px -160px -60px);
+  clip-path: inset(-180px -160px -180px);
   transition: clip-path 0s linear 0.7s;
   pointer-events: auto;
 }
@@ -566,15 +571,9 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   background: rgba(150, 120, 70, 0.35);
 }
 .book-page-head {
-  display: flex; justify-content: space-between; align-items: baseline;
-  color: #8b7a5c; font-size: 12px;
+  height: 30px;
   border-bottom: 1px solid rgba(150, 120, 70, 0.3);
-  padding-bottom: 7px; margin-bottom: 12px;
-}
-.book-page-no { font-size: 10.5px; color: #b3a58c; letter-spacing: 0.04em; }
-.book-page-day {
-  font-family: "GuideBook", "Songti SC", serif;
-  font-weight: 700; font-size: 14px; color: #6d5a3a;
+  margin-bottom: 12px;
 }
 .book-items {
   margin: 0; padding-left: 18px; display: block;
@@ -598,41 +597,49 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
   font-family: inherit;
 }
 
-/* ---------- Flexible leaf with two opaque paper faces ---------- */
-.flip-sheet {
+/* ---------- 翻页：可弯曲的纸（竖条串成曲面）+ 投在页面上的影子 ---------- */
+.book-spread { -webkit-user-select: none; user-select: none; }
+.flip-shadows,
+.flip-layer {
   position: absolute;
   inset: 0;
-  perspective: 3500px;
-  perspective-origin: 50% 55%;
   pointer-events: none;
+}
+.flip-shadows { z-index: 5; overflow: hidden; border-radius: 10px; }
+.flip-shadow { position: absolute; top: 0; bottom: 0; opacity: 0; }
+.flip-layer {
   z-index: 6;
+}
+.flip-leaf {
+  position: absolute;
+  inset: 0;
+  perspective: 3200px;
+  perspective-origin: 50% 50%;
 }
 .flip-strip {
   position: absolute;
   top: 0; bottom: 0;
   left: 50%;
-  transform-origin: left center;
-  transform-style: preserve-3d;
-}
-.flip-sheet.backward .flip-strip {
-  left: auto;
-  right: 50%;
-  transform-origin: right center;
+  transform-origin: 0 50%;
+  overflow: hidden;
 }
 .flip-face {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  backface-visibility: hidden;
+  contain: strict;
   background: #f9efd9;
 }
-.flip-face.reverse { transform: rotateY(180deg); }
-.flip-face .book-page { position: absolute; top: 0; bottom: 0; overflow: hidden; }
-.book.open .flip-face .book-page :is(.book-page-head, .book-items, .book-page-foot) {
-  opacity: 1;
-  transition: none;
+.flip-face.back { transform: scaleX(-1); }
+.flip-face.edge { border-radius: 0 10px 10px 0; }
+.flip-face.back.edge { border-radius: 10px 0 0 10px; }
+.flip-face .book-page { position: absolute; top: 0; bottom: 0; overflow: hidden; cursor: default; }
+.flip-face .book-page :is(.book-page-head, .book-items, .book-page-foot) {
+  opacity: 1 !important;
+  transition: none !important;
 }
 .flip-face .book-page::before { display: none; }
+.flip-shade { position: absolute; inset: 0; pointer-events: none; }
 
 /* ---------- 封面：右半 + 书脊为轴 + 正反两面 ---------- */
 .book-cover {
@@ -940,3 +947,10 @@ button:focus-visible, select:focus-visible {
   .card-pagination { grid-template-columns: 1fr 1fr; }
   .card-page-buttons { grid-column: 1 / -1; grid-row: 1; justify-self: center; }
 }
+
+#guide-mask .dialog-body { grid-template-columns: repeat(2,minmax(0,1fr)); align-items: start; }
+#guide-mask h3 { margin: 0 0 10px; font-size: 14px; }
+.guide-editor-rows { display: grid; gap: 12px; margin-bottom: 10px; }
+.guide-row-head { display: flex; align-items: center; gap: 6px; }
+.guide-row-head button { margin-left: auto; }
+@media (max-width: 600px) { #guide-mask .dialog-body { grid-template-columns: 1fr; } }

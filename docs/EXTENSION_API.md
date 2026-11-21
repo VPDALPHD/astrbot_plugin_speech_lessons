@@ -75,20 +75,17 @@ def find_speech_lessons_api(context):
 **最常用**。返回 `(block, 用到的卡片 id 列表)`：
 
 - `block` 是可直接拼进提示词的文本，**已经排好序**：
-  1. `【人类伪装指南 · 我的指南书】` + 最近几天的记录（每次必在，除非被配置关闭）
+  1. `【人类伪装指南 · 我的指南书】` + 最近有效观察与期间的批注（每次必在，除非被配置关闭）
   2. `【说话卡参考 · 主人在私聊里教的口气示范】` + 若干「✗反例 / ✓正例 / 要点」条目
 - **同步函数**（内部不 await），放在 async 代码里直接调，不要 `await`。
-- **只读最近 `guide_inject_days` 天**，不翻旧页。要翻旧页用下面的异步版。
+- 默认读取最近 30 条有效观察，并按当前文本匹配旧条目。
 - 没有任何内容时返回 `("", [])`，调用方据此跳过注入即可。
 - `max_chars` 只约束**说话卡**部分的预算；指南长度由本插件 `guide_max_chars` 决定。
 - 调用会顺带 `touch` 用到的卡片（用于闲置衰减计数），不影响正确性。
 
 ### 3.3b `await render_block_async(text: str, *, max_chars: int = 0) -> tuple[str, list[int]]`
 
-调用方是 async 时**优先用它**——在同步版基础上多一层「翻旧页」：先按当前文本切出关键词去搜旧页
-（二字滑窗），没命中再用向量召回（`guide_recall_days` / `guide_recall_threshold`）。
-指南书预算 `guide_max_chars`（默认 8000）会被整段带入，`max_chars` 仍然只裁说话卡。
-异常时自动退回同步版，不会抛给调用方。
+异步接口先按关键词匹配旧条目，未命中时可以使用条目向量召回。配置项为 guide_recall_entries 和 guide_recall_threshold。
 
 ### 3.4 `await learn_from_note(note, *, umo="", source="external") -> dict | None`
 

@@ -15,8 +15,9 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from astrbot.api import logger
 
@@ -468,6 +469,15 @@ class CardStore:
             ).fetchall()
             return [self._to_card(r) for r in rows]
 
+    def guide_card_material(self, start: float, end: float) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT scene,principle FROM cards WHERE status='active' AND created_at>=? AND created_at<? "
+                "ORDER BY created_at,id",
+                (start, end),
+            ).fetchall()
+        return ["：".join(filter(None, row)) for row in rows if any(row)]
+
     def by_id(self, card_id: int) -> Card | None:
         with self._lock:
             row = self._conn.execute(
@@ -777,506 +787,198 @@ class CardStore:
         except Exception:  # noqa: BLE001 - 迁移失败不影响启动
             return
 
-    @staticmethod
-    def _to_page(row: sqlite3.Row) -> dict:
-        content = str(row["content"] or "")
-        return {
-            "id": int(row["id"]),
-            "day": str(row["day"] or ""),
-            "content": content,
-            "chars": len(content.strip()),
-            "source": str(row["source"] or ""),
-            "use_count": int(row["use_count"] or 0),
-            "recall_count": int(row["recall_count"] or 0),
-            "created_at": float(row["created_at"] or 0),
-            "updated_at": float(row["updated_at"] or 0),
-        }
-
-    def journal_pages(self, limit: int = 200) -> list[dict]:
-        """按日期倒序取日记页（新的在前）。"""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM journal_pages ORDER BY day DESC, id DESC LIMIT ?",
-                (int(limit),),
+    def migrate_entries(self, parse_lines):
+        """Import legacy snapshots exactly once, retaining the originals for recovery."""
+        with self._lock, self._conn as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS guide_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
+            )
+            if db.execute("SELECT 1 FROM guide_state WHERE key='revision'").fetchone():
+                return
+            db.execute(
+                """CREATE TABLE guide_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, pos INTEGER NOT NULL, written INTEGER NOT NULL,
+                day TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL, hit_count INTEGER NOT NULL DEFAULT 0,
+                last_hit_at REAL NOT NULL DEFAULT 0)"""
+            )
+            db.execute("CREATE INDEX guide_position ON guide_entries(pos)")
+            db.execute("CREATE INDEX guide_date ON guide_entries(day)")
+            db.execute("CREATE INDEX guide_recency ON guide_entries(written)")
+            db.execute(
+                "CREATE TABLE guide_embeddings (model TEXT, text TEXT, vector TEXT NOT NULL, PRIMARY KEY(model,text))"
+            )
+            db.execute(
+                """INSERT INTO guide_entries(id,pos,written,day,kind,text,created_at,updated_at,hit_count,last_hit_at)
+                SELECT i.id,i.seq,i.seq,COALESCE(NULLIF(i.day,''),p.day,''),i.kind,i.text,
+                    i.created_at,i.updated_at,i.hit_count,i.last_hit_at
+                FROM journal_items i LEFT JOIN journal_pages p ON p.id=i.page_id"""
+            )
+            pages = db.execute(
+                """SELECT * FROM journal_pages p WHERE NOT EXISTS
+                (SELECT 1 FROM journal_items i WHERE i.page_id=p.id) ORDER BY day,id"""
             ).fetchall()
-        return [self._to_page(r) for r in rows]
+            for page in pages:
+                for seq, (kind, text) in enumerate(parse_lines(page["content"]), 1):
+                    db.execute(
+                        """INSERT INTO guide_entries(pos,written,day,kind,text,created_at,updated_at)
+                        VALUES(?,?,?,?,?,?,?)""",
+                        (seq, seq, page["day"], kind, text, page["created_at"], page["updated_at"]),
+                    )
+            ids = db.execute("SELECT id FROM guide_entries ORDER BY day,pos,id").fetchall()
+            db.executemany(
+                "UPDATE guide_entries SET pos=?,written=? WHERE id=?",
+                [(n, n, row[0]) for n, row in enumerate(ids, 1)],
+            )
+            db.execute("INSERT INTO guide_state VALUES ('revision',1)")
 
-    def journal_recent(self, limit: int = 2) -> list[dict]:
-        """最近 N 页，返回时按时间正序（方便按先后读）。"""
-        pages = self.journal_pages(limit=max(1, int(limit)))
-        return list(reversed(pages))
-
-    def journal_page(self, page_id: int) -> dict | None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM journal_pages WHERE id=?", (int(page_id),)
-            ).fetchone()
-        return self._to_page(row) if row else None
-
-    def journal_search(self, keyword: str, limit: int = 5) -> list[dict]:
-        """按关键词翻页：正文模糊匹配（关键词查询用）。"""
-        word = str(keyword or "").strip()
-        if not word:
-            return []
-        like = f"%{word}%"
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM journal_pages WHERE content LIKE ?"
-                " ORDER BY day DESC, id DESC LIMIT ?",
-                (like, max(1, int(limit))),
+    def guide_snapshot(self, interaction=False):
+        """Read a consistent revision and the ordered entries visible in this scope."""
+        with self._lock, self._conn as db:
+            db.execute("BEGIN")
+            rev = db.execute("SELECT value FROM guide_state WHERE key='revision'").fetchone()[0]
+            rows = db.execute(
+                """SELECT e.id,e.day,e.kind,e.text,e.written,e.updated_at
+                FROM guide_entries e LEFT JOIN journal_interaction_labels c ON c.text=e.text
+                WHERE (?=0 OR c.is_interaction=1) ORDER BY e.pos,e.id""",
+                (int(interaction),),
             ).fetchall()
-        return [self._to_page(r) for r in rows]
+            return rev, [dict(row) for row in rows]
 
-    def journal_page_by_day(self, day: str) -> dict | None:
+    def guide_reviewed(self, day):
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM journal_pages WHERE day=?", (str(day or ""),)
-            ).fetchone()
-        return self._to_page(row) if row else None
-
-    def journal_upsert(self, day: str, content: str, source: str = "panel") -> int:
-        """按天写一页：已有就整页覆盖，没有就新建。"""
-        text = str(content or "").strip()
-        now = time.time()
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT id, created_at FROM journal_pages WHERE day=?", (str(day),)
-            ).fetchone()
-            if row:
+            return bool(
                 self._conn.execute(
-                    "UPDATE journal_pages SET content=?, source=?, updated_at=? WHERE id=?",
-                    (text, str(source or "panel"), now, int(row["id"])),
-                )
-                page_id = int(row["id"])
-            else:
-                cur = self._conn.execute(
-                    "INSERT INTO journal_pages (day, content, source, created_at, updated_at)"
-                    " VALUES (?,?,?,?,?)",
-                    (str(day), text, str(source or "panel"), now, now),
-                )
-                page_id = int(cur.lastrowid or 0)
-            self._conn.commit()
-        return page_id
-
-    def journal_append(self, day: str, text: str, source: str = "auto") -> tuple[int, bool]:
-        """往某天的日记后面续一段（同页重复内容会跳过）。返回 (页 id, 是否写入)。"""
-        chunk = str(text or "").strip()
-        if not chunk:
-            page = self.journal_page_by_day(day)
-            return (int(page["id"]) if page else 0), False
-        page = self.journal_page_by_day(day)
-        if page and chunk in str(page["content"] or ""):
-            return int(page["id"]), False
-        if not page:
-            return self.journal_upsert(day, chunk, source), True
-        merged = (str(page["content"] or "").rstrip() + "\n\n" + chunk).strip()
-        return self.journal_upsert(day, merged, source), True
-
-    def journal_delete(self, page_id: int) -> bool:
-        with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM journal_pages WHERE id=?", (int(page_id),)
-            )
-            self._conn.execute(
-                "DELETE FROM journal_vectors WHERE page_id=?", (int(page_id),)
-            )
-            self._conn.execute(
-                "DELETE FROM journal_items WHERE page_id=?", (int(page_id),)
-            )
-            self._conn.commit()
-            return bool(cur.rowcount)
-
-    def journal_replace_all(self, pages: list[dict], source: str = "review") -> int:
-        """整本日记重写：清空后按页写入（精炼用）。"""
-        now = time.time()
-        rows = []
-        for page in pages:
-            day = str(page.get("day") or "").strip()
-            content = str(page.get("content") or "").strip()
-            if not day or not content:
-                continue
-            rows.append((day, content, str(source or "review"), now, now))
-        with self._lock:
-            self._conn.execute("DELETE FROM journal_pages")
-            self._conn.execute("DELETE FROM journal_vectors")
-            for row in rows:
-                self._conn.execute(
-                    "INSERT INTO journal_pages (day, content, source, created_at, updated_at)"
-                    " VALUES (?,?,?,?,?)",
-                    row,
-                )
-            self._conn.commit()
-        return len(rows)
-
-    def journal_stats(self) -> dict:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS pages, COALESCE(SUM(LENGTH(content)),0) AS chars,"
-                " MAX(day) AS latest_day, MAX(updated_at) AS latest_at"
-                " FROM journal_pages"
-            ).fetchone()
-        return {
-            "pages": int(row["pages"] or 0) if row else 0,
-            "chars": int(row["chars"] or 0) if row else 0,
-            "latest_day": str(row["latest_day"] or "") if row else "",
-            "latest_at": float(row["latest_at"] or 0) if row else 0.0,
-        }
-
-    def journal_touch(self, ids: Iterable[int]) -> None:
-        now = time.time()
-        ids = [int(i) for i in ids if i]
-        if not ids:
-            return
-        with self._lock:
-            self._conn.executemany(
-                "UPDATE journal_pages SET use_count=use_count+1, last_used_at=? WHERE id=?",
-                [(now, i) for i in ids],
-            )
-            self._conn.commit()
-
-    def journal_mark_recall(self, ids: Iterable[int]) -> None:
-        """被「想起」的旧页记一次召回，用于以后判断哪些页还活着。"""
-        ids = [int(i) for i in ids if i]
-        if not ids:
-            return
-        with self._lock:
-            self._conn.executemany(
-                "UPDATE journal_pages SET recall_count=recall_count+1 WHERE id=?",
-                [(i,) for i in ids],
-            )
-            self._conn.commit()
-
-    def journal_save_vector(self, page_id: int, vec: list[float], model: str = "") -> bool:
-        if not page_id or not vec:
-            return False
-        try:
-            payload = json.dumps([round(float(x), 6) for x in vec], separators=(",", ":"))
-        except (TypeError, ValueError):
-            return False
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO journal_vectors (page_id, model, dim, vec, updated_at)"
-                " VALUES (?,?,?,?,?)"
-                " ON CONFLICT(page_id) DO UPDATE SET model=excluded.model,"
-                " dim=excluded.dim, vec=excluded.vec, updated_at=excluded.updated_at",
-                (int(page_id), str(model or ""), len(vec), payload, time.time()),
-            )
-            self._conn.commit()
-        return True
-
-    def journal_vectors(self, model: str = "") -> dict[int, list[float]]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT page_id, vec FROM journal_vectors WHERE model=?",
-                (str(model or ""),),
-            ).fetchall()
-        out: dict[int, list[float]] = {}
-        for row in rows:
-            try:
-                vec = [float(x) for x in json.loads(row["vec"] or "[]")]
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if vec:
-                out[int(row["page_id"])] = vec
-        return out
-
-    def journal_vector_meta(self, model: str = "") -> dict[int, float]:
-        """每页向量最后一次算出来的时间（用来判断向量是否比页面还旧）。"""
-        try:
-            with self._lock:
-                rows = self._conn.execute(
-                    "SELECT page_id, updated_at FROM journal_vectors WHERE model=?",
-                    (str(model or ""),),
-                ).fetchall()
-        except sqlite3.Error:
-            return {}
-        return {int(r["page_id"]): float(r["updated_at"] or 0) for r in rows}
-
-    def journal_vector_count(self, model: str = "") -> int:
-        try:
-            with self._lock:
-                row = self._conn.execute(
-                    "SELECT COUNT(*) AS n FROM journal_vectors WHERE model=?",
-                    (str(model or ""),),
+                    "SELECT 1 FROM guide_state WHERE key=?", ("review:" + day,)
                 ).fetchone()
-            return int(row["n"]) if row else 0
-        except Exception:
-            return 0
-
-    # ------------------------------------------------------------ 结构化条目
-    def journal_items(self, page_id: int) -> list[dict]:
-        """取某一页的行（按 seq 升序）：kind=item/note/struck。"""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT i.*, c.is_interaction FROM journal_items i "
-                "LEFT JOIN journal_interaction_labels c ON c.text=i.text "
-                "WHERE i.page_id=? ORDER BY i.seq ASC, i.id ASC",
-                (int(page_id),),
-            ).fetchall()
-        return [
-            {
-                "id": int(r["id"]),
-                "page_id": int(r["page_id"]),
-                "day": str(r["day"] or ""),
-                "kind": str(r["kind"] or "item"),
-                "seq": int(r["seq"] or 0),
-                "text": str(r["text"] or ""),
-                "tag": "interaction" if r["is_interaction"] == 1 else "",
-                "hit_count": int(r["hit_count"] or 0),
-            }
-            for r in rows
-        ]
-
-    def journal_search_items(self, keyword: str, limit: int = 20, *, interaction_only: bool = False) -> list[dict]:
-        """按条目检索指南，返回命中的条目及所属日期；不会加载整页正文。"""
-        word = str(keyword or "").strip()
-        if not word:
-            return []
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT i.*, p.id AS owner_page_id, c.is_interaction FROM journal_items i "
-                "JOIN journal_pages p ON p.id=i.page_id "
-                "LEFT JOIN journal_interaction_labels c ON c.text=i.text "
-                "WHERE i.text LIKE ? AND i.kind='item' AND (?=0 OR c.is_interaction=1) "
-                "ORDER BY p.day DESC, i.seq ASC LIMIT ?",
-                (f"%{word}%", int(interaction_only), max(1, int(limit))),
-            ).fetchall()
-        return [{"id": int(r["id"]), "page_id": int(r["owner_page_id"]),
-                 "day": str(r["day"] or ""), "kind": str(r["kind"] or "item"),
-                 "seq": int(r["seq"] or 0), "text": str(r["text"] or ""),
-                 "tag": "interaction" if r["is_interaction"] == 1 else ""} for r in rows]
-
-    def journal_mutate_items(
-        self, page_id: int, day: str, *, action: str, item_id: int = 0,
-        after_seq: int = 0, text: str = "", kind: str = "item", tag: str = "",
-    ) -> bool:
-        """原子地增删改条目，并规范序号、同步页快照、清除过期向量。"""
-        now = time.time()
-        body = str(text or "").strip()
-        if action in {"insert", "update"} and not body:
-            return False
-        with self._lock:
-            try:
-                self._conn.execute("BEGIN IMMEDIATE")
-                if action == "insert":
-                    seq = self._conn.execute(
-                        "SELECT COALESCE(MAX(seq),0) FROM journal_items WHERE page_id=?",
-                        (int(page_id),),
-                    ).fetchone()[0]
-                    after = max(0, min(int(after_seq), int(seq)))
-                    self._conn.execute(
-                        "UPDATE journal_items SET seq=seq+1,updated_at=? WHERE page_id=? AND seq>?",
-                        (now, int(page_id), after),
-                    )
-                    self._conn.execute(
-                        "INSERT INTO journal_items (page_id,day,kind,seq,text,tag,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                        (int(page_id), str(day), kind if kind in ("item", "note") else "item",
-                         after + 1, body, self.norm_tag(tag), now, now),
-                    )
-                elif action == "update":
-                    # 不传 tag（空串）= 保留原标签，避免"只改错别字"把标签清掉
-                    new_tag = self.norm_tag(tag)
-                    if new_tag:
-                        cur = self._conn.execute(
-                            "UPDATE journal_items SET text=?,tag=?,updated_at=? WHERE id=? AND page_id=?",
-                            (body, new_tag, now, int(item_id), int(page_id)),
-                        )
-                    else:
-                        cur = self._conn.execute(
-                            "UPDATE journal_items SET text=?,updated_at=? WHERE id=? AND page_id=?",
-                            (body, now, int(item_id), int(page_id)),
-                        )
-                    if not cur.rowcount:
-                        self._conn.rollback()
-                        return False
-                elif action == "strike":
-                    cur = self._conn.execute(
-                        "UPDATE journal_items SET kind='struck',updated_at=? WHERE id=? AND page_id=?",
-                        (now, int(item_id), int(page_id)),
-                    )
-                    if not cur.rowcount:
-                        self._conn.rollback()
-                        return False
-                elif action == "delete":
-                    row = self._conn.execute(
-                        "SELECT seq FROM journal_items WHERE id=? AND page_id=?",
-                        (int(item_id), int(page_id)),
-                    ).fetchone()
-                    if not row:
-                        self._conn.rollback()
-                        return False
-                    self._conn.execute("DELETE FROM journal_items WHERE id=?", (int(item_id),))
-                    self._conn.execute(
-                        "UPDATE journal_items SET seq=seq-1,updated_at=? WHERE page_id=? AND seq>?",
-                        (now, int(page_id), int(row["seq"])),
-                    )
-                else:
-                    self._conn.rollback()
-                    return False
-                rows = self._conn.execute(
-                    "SELECT kind,text FROM journal_items WHERE page_id=? ORDER BY seq,id",
-                    (int(page_id),),
-                ).fetchall()
-                snapshot = render_items_snapshot(
-                    [
-                        {"kind": row["kind"], "text": row["text"]}
-                        for row in rows
-                    ]
-                )
-                self._conn.execute(
-                    "UPDATE journal_pages SET content=?,updated_at=? WHERE id=?",
-                    (snapshot, now, int(page_id)),
-                )
-                self._conn.execute("DELETE FROM journal_vectors WHERE page_id=?", (int(page_id),))
-                self._conn.commit()
-                return True
-            except Exception:
-                self._conn.rollback()
-                raise
-
-    def journal_items_count(self) -> int:
-        with self._lock:
-            row = self._conn.execute("SELECT COUNT(*) AS n FROM journal_items").fetchone()
-        return int(row["n"]) if row else 0
-
-    def journal_replace_items(
-        self, page_id: int, day: str, items: list[dict], snapshot: str
-    ) -> None:
-        """整页替换：清掉该页旧行、按顺序写入新行，并更新 content 快照。"""
-        now = time.time()
-        with self._lock:
-            self._conn.execute(
-                "DELETE FROM journal_items WHERE page_id=?", (int(page_id),)
             )
-            for index, item in enumerate(items, 1):
-                kind = str(item.get("kind") or "item")
-                text = str(item.get("text") or "").strip()
-                if not text:
-                    continue
-                self._conn.execute(
-                    "INSERT INTO journal_items"
-                    " (page_id, day, kind, seq, text, tag, created_at, updated_at)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        int(page_id),
-                        str(day or ""),
-                        kind,
-                        index,
-                        text,
-                        self.norm_tag(item.get("tag")),
-                        now,
-                        now,
-                    ),
-                )
-            self._conn.execute(
-                "UPDATE journal_pages SET content=?, updated_at=? WHERE id=?",
-                (str(snapshot or ""), now, int(page_id)),
-            )
-            # 内容变了，旧向量就是过期的：删掉，召回时会按新内容懒重算
-            self._conn.execute(
-                "DELETE FROM journal_vectors WHERE page_id=?", (int(page_id),)
-            )
-            self._conn.commit()
 
-    def journal_item(self, item_id: int) -> dict | None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM journal_items WHERE id=?", (int(item_id),)
-            ).fetchone()
-        if not row:
-            return None
-        return {
-            "id": int(row["id"]),
-            "page_id": int(row["page_id"]),
-            "day": str(row["day"] or ""),
-            "kind": str(row["kind"] or "item"),
-            "seq": int(row["seq"] or 0),
-            "text": str(row["text"] or ""),
-            "tag": self.norm_tag(row["tag"]),
-        }
-
-    def journal_update_item(
+    def change_entries(
         self,
-        item_id: int,
+        day,
+        rows,
         *,
-        text: str | None = None,
-        kind: str | None = None,
-        tag: str | None = None,
-    ) -> bool:
-        sets: list[str] = []
-        params: list[Any] = []
-        if text is not None:
-            sets.append("text=?")
-            params.append(str(text).strip())
-        if kind is not None:
-            sets.append("kind=?")
-            params.append(str(kind))
-        if tag is not None:
-            sets.append("tag=?")
-            params.append(self.norm_tag(tag))
-        if not sets:
-            return False
-        sets.append("updated_at=?")
-        params.append(time.time())
-        params.append(int(item_id))
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE journal_items SET " + ", ".join(sets) + " WHERE id=?",
-                tuple(params),
-            )
-            self._conn.commit()
-            return bool(cur.rowcount)
+        original=(),
+        revision=None,
+        append=False,
+        review=False,
+        rewrite_day=False,
+    ):
+        """Apply one ordered edit or append transaction; stale editors cannot overwrite a concurrent change."""
+        with self._lock, self._conn as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT value FROM guide_state WHERE key='revision'").fetchone()[0]
+            if (
+                review
+                and db.execute(
+                    "SELECT 1 FROM guide_state WHERE key=?", ("review:" + day,)
+                ).fetchone()
+            ):
+                return []
+            if revision is not None and current != revision:
+                raise ValueError("打开编辑器后指南有更新，请重新打开编辑器后再保存。")
+            if append:
+                entries = []
+                tail = db.execute("SELECT COALESCE(MAX(pos),0) FROM guide_entries").fetchone()[0]
+                seen = set(
+                    map(
+                        tuple,
+                        db.execute(
+                            "SELECT kind,text FROM guide_entries WHERE day=? AND kind!='struck'",
+                            (day,),
+                        ),
+                    )
+                )
+            else:
+                entries = [
+                    dict(r) for r in db.execute("SELECT * FROM guide_entries ORDER BY pos,id")
+                ]
+                tail = 0
+                seen = set()
+            by_id = {r["id"]: r for r in entries}
+            positions = {r["id"]: i for i, r in enumerate(entries)}
+            if rewrite_day:
+                original = [r["id"] for r in entries if r["day"] == day]
+            original = list(original)
+            if any(i not in by_id for i in original) or len(set(original)) != len(original):
+                raise ValueError("选中的记录已变化。")
+            start = positions[original[0]] if original else len(entries)
+            if (
+                not rewrite_day
+                and [r["id"] for r in entries[start : start + len(original)]] != original
+            ):
+                raise ValueError("只能编辑连续的书页。")
+            if not append and not original and entries and not rewrite_day:
+                raise ValueError("缺少编辑范围。")
+            selected = set(original)
+            kept = set()
+            new_ids = []
+            written = db.execute("SELECT COALESCE(MAX(written),0) FROM guide_entries").fetchone()[0]
+            now = time.time()
+            for row in rows:
+                kind, body, key = row["kind"], row["text"].strip(), row.get("id")
+                if kind not in ("item", "note", "struck") or not body:
+                    raise ValueError("条目类型或内容无效。")
+                if key is not None:
+                    if key not in selected or key in kept:
+                        raise ValueError("条目编号超出当前编辑范围。")
+                    kept.add(key)
+                    if (kind, body) != (by_id[key]["kind"], by_id[key]["text"]):
+                        db.execute(
+                            "UPDATE guide_entries SET kind=?,text=?,updated_at=? WHERE id=?",
+                            (kind, body, now, key),
+                        )
+                else:
+                    if append and (kind, body) in seen:
+                        continue
+                    seen.add((kind, body))
+                    written += 1
+                    key = db.execute(
+                        """INSERT INTO guide_entries(pos,written,day,kind,text,created_at,updated_at)
+                        VALUES(?,?,?,?,?,?,?)""",
+                        (tail + len(new_ids) + 1, written, day, kind, body, now, now),
+                    ).lastrowid
+                new_ids.append(key)
+            db.executemany("DELETE FROM guide_entries WHERE id=?", [(i,) for i in selected - kept])
+            if not append:
+                order = [r["id"] for r in entries if r["id"] not in selected]
+                order[start:start] = new_ids
+                db.executemany(
+                    "UPDATE guide_entries SET pos=? WHERE id=?",
+                    [
+                        (i, key)
+                        for i, key in enumerate(order, 1)
+                        if key not in by_id or by_id[key]["pos"] != i
+                    ],
+                )
+            if original or new_ids:
+                db.execute("UPDATE guide_state SET value=value+1 WHERE key='revision'")
+            if review:
+                db.execute("INSERT INTO guide_state VALUES (?,1)", ("review:" + day,))
+            return new_ids
 
-    def journal_delete_item(self, item_id: int) -> bool:
+    def guide_vectors(self, model):
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM journal_items WHERE id=?", (int(item_id),)
-            )
-            self._conn.commit()
-            return bool(cur.rowcount)
+            return {
+                text: json.loads(vector)
+                for text, vector in self._conn.execute(
+                    "SELECT text,vector FROM guide_embeddings WHERE model=?", (model,)
+                )
+            }
 
-    def journal_insert_item(
-        self,
-        page_id: int,
-        day: str,
-        after_seq: int,
-        kind: str,
-        text: str,
-        tag: str = "",
-    ) -> int:
-        """在某行之后插入一行（after_seq=0 表示插到最前面）。"""
-        now = time.time()
-        body = str(text or "").strip()
-        if not body:
-            return 0
-        with self._lock:
-            self._conn.execute(
-                "UPDATE journal_items SET seq=seq+1 WHERE page_id=? AND seq>?",
-                (int(page_id), int(after_seq)),
+    def save_guide_vectors(self, model, pairs):
+        with self._lock, self._conn as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO guide_embeddings VALUES (?,?,?)",
+                [(model, text, json.dumps(vec)) for text, vec in pairs if vec],
             )
-            cur = self._conn.execute(
-                "INSERT INTO journal_items"
-                " (page_id, day, kind, seq, text, tag, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    int(page_id),
-                    str(day or ""),
-                    str(kind or "item"),
-                    int(after_seq) + 1,
-                    body,
-                    self.norm_tag(tag),
-                    now,
-                    now,
-                ),
-            )
-            self._conn.commit()
-            return int(cur.lastrowid or 0)
 
     def journal_unclassified_texts(self, limit: int = 32) -> list[str]:
         """Return the latest unique texts awaiting independent classification."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT i.text FROM journal_items i "
+                "SELECT i.text FROM guide_entries i "
                 "LEFT JOIN journal_interaction_labels c ON c.text=i.text "
                 "WHERE i.kind!='struck' AND c.text IS NULL "
                 "GROUP BY i.text ORDER BY MAX(i.id) DESC LIMIT ?",
@@ -1291,36 +993,9 @@ class CardStore:
                 "INSERT OR IGNORE INTO journal_interaction_labels(text, is_interaction) VALUES (?, ?)",
                 labels,
             )
-            self._conn.executemany(
-                "DELETE FROM journal_vectors WHERE model LIKE '%:journal-items-v3:interaction' "
-                "AND page_id IN (SELECT page_id FROM journal_items WHERE text=?)",
-                [(text,) for text, interaction in labels if interaction],
-            )
-
-    def journal_tag_stats(self) -> dict:
-        """Count current rows using the independent classification."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS total, COUNT(CASE WHEN c.is_interaction=1 THEN 1 END) AS tagged "
-                "FROM journal_items i LEFT JOIN journal_interaction_labels c ON c.text=i.text"
-            ).fetchone()
-        return {"interaction": row["tagged"], "untagged": row["total"] - row["tagged"]}
-
-    def journal_touch_items(self, ids: Iterable[int]) -> None:
-        ids = [int(i) for i in ids if i]
-        if not ids:
-            return
-        now = time.time()
-        with self._lock:
-            self._conn.executemany(
-                "UPDATE journal_items SET hit_count=hit_count+1, last_hit_at=? WHERE id=?",
-                [(now, i) for i in ids],
-            )
-            self._conn.commit()
 
     def close(self) -> None:
         try:
             self._conn.close()
         except Exception:
             pass
-
