@@ -15,6 +15,7 @@ const state = {
   direction: "desc",
   requestId: 0,
   editing: null,
+  tagClassifyId: 0,
   pendingDelete: 0,
   pendingTimer: null,
 };
@@ -237,8 +238,19 @@ async function callAction(id, action, okText) {
 }
 
 /* ------------------------------------------------------------ 编辑器 */
+function setTagAutoError(message = "") {
+  const errEl = $("f-tags-err");
+  const input = $("f-tags");
+  if (input) input.classList.toggle("invalid", Boolean(message));
+  if (errEl) {
+    errEl.textContent = message;
+    errEl.classList.toggle("hidden", !message);
+  }
+}
+
 function openEditor(card) {
   state.editing = card || null;
+  state.tagClassifyId += 1;
   $("dlg-title").textContent = card ? `编辑说话卡 #${card.id}` : "新建说话卡";
   $("f-scene").value = card ? card.scene || "" : "";
   $("f-bad").value = card ? card.bad || "" : "";
@@ -247,13 +259,63 @@ function openEditor(card) {
   $("f-tags").value = card ? (card.tags || []).join(",") : "";
   $("f-weight").value = card ? Number(card.weight || 1.5).toFixed(1) : "1.5";
   $("dlg-err").textContent = "";
+  setTagAutoError("");
+  const autoBtn = $("f-tags-auto");
+  if (autoBtn) {
+    autoBtn.disabled = false;
+    autoBtn.textContent = "自动识别";
+  }
   $("mask").classList.remove("hidden");
   setTimeout(() => $("f-scene").focus(), 30);
 }
 
 function closeEditor() {
+  state.tagClassifyId += 1;
   $("mask").classList.add("hidden");
   state.editing = null;
+}
+
+async function autoClassifyTags() {
+  const scene = $("f-scene").value.trim();
+  const bad = $("f-bad").value.trim();
+  const good = $("f-good").value.trim();
+  const principle = $("f-principle").value.trim();
+  $("dlg-err").textContent = "";
+  if (!scene && !bad && !good && !principle) {
+    setTagAutoError("说话卡内容为空，请先填写场景、反例、正例或要点后再识别。");
+    return;
+  }
+  setTagAutoError("");
+  const btn = $("f-tags-auto");
+  const reqId = ++state.tagClassifyId;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "识别中…";
+  }
+  try {
+    const payload = { scene, bad, good, principle };
+    if (state.editing && state.editing.id) payload.id = state.editing.id;
+    const result = await bridge.apiPost("cards/classify_tags", payload);
+    if (reqId !== state.tagClassifyId) return;
+    const tags = Array.isArray(result && result.tags)
+      ? result.tags.map((t) => String(t || "").trim()).filter(Boolean)
+      : [];
+    if (!tags.length) {
+      setTagAutoError("向量模型未返回有效标签，请检查向量模型配置或补充卡片内容。");
+      return;
+    }
+    $("f-tags").value = tags.join(",");
+    setTagAutoError("");
+    toast(`已识别标签：${tags.join("、")}`);
+  } catch (error) {
+    if (reqId !== state.tagClassifyId) return;
+    setTagAutoError((error && error.message) || "向量模型分类失败，请检查向量模型配置。");
+  } finally {
+    if (reqId === state.tagClassifyId && btn) {
+      btn.disabled = false;
+      btn.textContent = "自动识别";
+    }
+  }
 }
 
 async function save() {
@@ -288,45 +350,13 @@ async function save() {
 }
 
 /* ------------------------------------------------------------ 设置面板 */
-const cfgState = { fields: [], values: {}, providers: [], chatProviders: [] };
-
-function embProviderSelect(currentProvider) {
-  const select = document.createElement("select");
-  select.className = "emb-select";
-  select.dataset.role = "emb-provider";
-  const add = (value, text) => {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = text;
-    select.append(option);
-  };
-  add("", "手动填写（独立 API / 自定义模型名）");
-  for (const prov of cfgState.providers) add(prov.id, prov.label);
-  select.value = cfgState.providers.some((p) => p.id === currentProvider)
-    ? currentProvider
-    : "";
-  select.addEventListener("change", () => {
-    const pid = select.value;
-    const provField = document.querySelector('[data-key="emb_provider_id"]');
-    const dimField = document.querySelector('[data-key="emb_dim"]');
-    const baseField = document.querySelector('[data-key="emb_api_base"]');
-    const keyField = document.querySelector('[data-key="emb_api_key"]');
-    const modelField = document.querySelector('[data-key="emb_model"]');
-    const prov = cfgState.providers.find((p) => p.id === pid);
-    if (pid) {
-      if (provField) provField.value = pid;
-      if (dimField && prov && prov.dim) dimField.value = String(prov.dim);
-      // Base/Key 留空 → 仍走 AstrBot 接口；只把模型名填上做展示，避免看起来"没填"
-      if (baseField) baseField.value = "";
-      if (keyField) keyField.value = "";
-      if (modelField) modelField.value = (prov && prov.model) || "";
-    } else if (provField) {
-      provField.value = "";
-    }
-    if (modelField) modelField.disabled = Boolean(pid);
-  });
-  return select;
-}
+const cfgState = {
+  fields: [],
+  values: {},
+  providers: [],
+  chatProviders: [],
+  defaultChatProvider: "",
+};
 
 // 纯勾选开关（没有下拉/角色）—— 这类统一排到每栏最后。
 function isToggleField(field) {
@@ -362,7 +392,7 @@ function cfgField(field, value) {
     return label;
   }
 
-  // ② 平台向量模型下拉（列表为空也照样渲染，给占位项）
+  // ② 平台向量模型下拉（不选则跟随 AstrBot 默认）
   if (field.role === "embedding-provider") {
     const select = document.createElement("select");
     select.className = "emb-select";
@@ -374,15 +404,20 @@ function cfgField(field, value) {
       option.textContent = text;
       select.append(option);
     };
-    addOption("", "不选（使用下面手动填写的 API）");
-    if (!cfgState.providers.length) {
-      addOption("__none__", "平台没有已配置的 embedding 模型");
-    }
+    const defaultEmb = cfgState.providers[0];
+    addOption(
+      "",
+      defaultEmb
+        ? `跟随 AstrBot 默认（${defaultEmb.label}）`
+        : "跟随 AstrBot 默认（平台未配置 embedding 模型）",
+    );
     for (const prov of cfgState.providers) addOption(prov.id, prov.label);
     const current = String(value || "");
     select.value = cfgState.providers.some((p) => p.id === current) ? current : "";
     select.addEventListener("change", () => {
-      const prov = cfgState.providers.find((p) => p.id === select.value);
+      const prov = select.value
+        ? cfgState.providers.find((p) => p.id === select.value)
+        : cfgState.providers[0];
       const dimField = document.querySelector('[data-key="emb_dim"]');
       if (dimField && prov && prov.dim) dimField.value = String(prov.dim);
       syncConditionals();
@@ -391,7 +426,7 @@ function cfgField(field, value) {
     return label;
   }
 
-  // ③ 提炼模型下拉（同样空列表也渲染）
+  // ③ 提炼模型下拉（不选则跟随 AstrBot 默认）
   if (field.role === "chat-provider") {
     const select = document.createElement("select");
     select.className = "emb-select";
@@ -403,10 +438,15 @@ function cfgField(field, value) {
       option.textContent = text;
       select.append(option);
     };
-    addOption("", "不选（使用下面手动填写的 API）");
-    if (!cfgState.chatProviders.length) {
-      addOption("__none__", "平台没有已配置的对话模型");
-    }
+    const defaultChat = cfgState.defaultChatProvider;
+    addOption(
+      "",
+      defaultChat
+        ? `跟随 AstrBot 默认（${defaultChat}）`
+        : cfgState.chatProviders.length
+          ? "跟随 AstrBot 默认"
+          : "跟随 AstrBot 默认（平台未配置对话模型）",
+    );
     for (const prov of cfgState.chatProviders) addOption(prov.id, prov.label);
     const current = String(value || "");
     select.value = cfgState.chatProviders.some((p) => p.id === current) ? current : "";
@@ -437,6 +477,7 @@ function cfgField(field, value) {
   const input = document.createElement("input");
   input.dataset.key = field.key;
   input.dataset.type = field.type || "text";
+  if (field.role) input.dataset.role = field.role;
   if (field.type === "password") {
     input.type = "password";
     input.autocomplete = "new-password";
@@ -452,7 +493,54 @@ function cfgField(field, value) {
   input.value = value === undefined || value === null ? "" : String(value);
   if (field.wide) input.classList.add("wide");
   label.append(input);
+  if (field.role === "id-list") {
+    const errEl = el("span", "field-err hidden");
+    errEl.setAttribute("aria-live", "polite");
+    label.append(errEl);
+    input.addEventListener("input", () => checkIdListField(input));
+    input.addEventListener("blur", () => checkIdListField(input));
+  }
   return label;
+}
+
+function validateIdList(raw) {
+  const text = raw === undefined || raw === null ? "" : String(raw);
+  if (text === "") return "";
+  const reasons = [];
+  if (/\s/.test(text)) reasons.push("不能包含空格或换行");
+  if (text.includes("，")) reasons.push("请使用英文逗号 ,（不要用中文逗号 ，）");
+  if (/[、；;|/]/.test(text)) reasons.push("只允许使用英文逗号 , 分隔");
+  if (text.startsWith(",") || text.endsWith(",")) reasons.push("开头或结尾不能有多余逗号");
+  if (text.includes(",,")) reasons.push("存在连续逗号（空项）");
+  const tokens = text.split(/[,，、；;|/\s]+/).filter(Boolean);
+  const bad = tokens.filter((t) => !/^[0-9]+$/.test(t));
+  if (bad.length) reasons.push(`号码必须为纯半角数字（无效项：${bad.slice(0, 3).join("、")}）`);
+  const seen = new Set();
+  const dups = [];
+  for (const t of tokens) {
+    if (/^[0-9]+$/.test(t)) {
+      if (seen.has(t) && !dups.includes(t)) dups.push(t);
+      seen.add(t);
+    }
+  }
+  if (dups.length) reasons.push(`存在重复号码（${dups.slice(0, 3).join("、")}）`);
+  if (!reasons.length && !/^[0-9]+(?:,[0-9]+)*$/.test(text)) {
+    reasons.push("格式不符合英文逗号分隔的纯数字规范");
+  }
+  return reasons.length ? `格式错误：${reasons.join("；")}。规范示例：123456,789012` : "";
+}
+
+function checkIdListField(input) {
+  const field = input.closest(".field");
+  const errEl = field ? field.querySelector(".field-err") : null;
+  const err = validateIdList(input.value);
+  input.classList.toggle("invalid", Boolean(err));
+  input.setAttribute("aria-invalid", err ? "true" : "false");
+  if (errEl) {
+    errEl.textContent = err;
+    errEl.classList.toggle("hidden", !err);
+  }
+  return err;
 }
 
 function syncConditionals() {
@@ -471,12 +559,13 @@ function renderConfig(payload) {
   cfgState.values = payload.values || {};
   cfgState.providers = payload.providers || [];
   cfgState.chatProviders = payload.chat_providers || [];
+  cfgState.defaultChatProvider = payload.default_chat_provider || "";
   const body = $("cfg-body");
   body.innerHTML = "";
 
   const emb = payload.embedding || {};
   const banner = el("div", "cfg-banner");
-  const modeText = emb.mode === "api" ? "独立 API" : "AstrBot 自带接口";
+  const modeText = emb.mode === "manual" || emb.mode === "api" ? "独立 API" : "AstrBot 默认接口";
   banner.append(el("b", "", `向量：${emb.enabled ? "已启用" : "已关闭"}`));
   banner.append(
     el(
@@ -545,11 +634,14 @@ function renderConfig(payload) {
     body.append(section);
   }
   syncConditionals();
+  for (const input of body.querySelectorAll('input[data-role="id-list"]')) {
+    checkIdListField(input);
+  }
   body.append(
     el(
       "p",
       "hint",
-      "留空 Embedding Base URL 与模型名 = 用 AstrBot 自带的 embedding 接口。改完保存后立刻生效，无需重启。",
+      "模型下拉选择「跟随 AstrBot 默认」即使用平台当前默认模型。改完保存后立刻生效，无需重启。",
     ),
   );
 }
@@ -591,6 +683,22 @@ function collectConfig() {
 }
 
 async function saveConfig() {
+  let firstInvalid = null;
+  let firstErr = "";
+  for (const input of $("cfg-body").querySelectorAll('input[data-role="id-list"]')) {
+    const err = checkIdListField(input);
+    const holder = input.closest("[data-show-key]");
+    if (err && !firstInvalid && (!holder || !holder.classList.contains("hidden"))) {
+      firstInvalid = input;
+      firstErr = err;
+    }
+  }
+  if (firstInvalid) {
+    $("cfg-err").textContent = firstErr;
+    firstInvalid.focus();
+    firstInvalid.scrollIntoView({ block: "center", behavior: "smooth" });
+    return;
+  }
   $("cfg-save").disabled = true;
   $("cfg-err").textContent = "";
   try {
@@ -1482,6 +1590,10 @@ async function main() {
   $("dlg-close").addEventListener("click", closeEditor);
   $("dlg-cancel").addEventListener("click", closeEditor);
   $("dlg-save").addEventListener("click", save);
+  $("f-tags-auto").addEventListener("click", autoClassifyTags);
+  for (const id of ["f-scene", "f-bad", "f-good", "f-principle", "f-tags"]) {
+    $(id).addEventListener("input", () => setTagAutoError(""));
+  }
   $("mask").addEventListener("click", (event) => {
     if (event.target === $("mask")) closeEditor();
   });

@@ -6,7 +6,7 @@
     <meta http-equiv="pragma" content="no-cache" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>说话卡面板</title>
-    <link rel="stylesheet" href="./style.css?v=4.8.2" />
+    <link rel="stylesheet" href="./style.css?v=4.8.5" />
   </head>
   <body>
     <header class="top">
@@ -142,10 +142,14 @@
             <textarea id="f-principle" rows="2" placeholder="例：接梗式短句，别反问，别解释"></textarea>
           </label>
           <div class="field-row">
-            <label class="field">
-              <span>标签 <em>逗号分隔</em></span>
-              <input id="f-tags" type="text" placeholder="接梗,语气" />
-            </label>
+            <div class="field">
+              <label for="f-tags">标签 <em>逗号分隔</em></label>
+              <div class="input-with-btn">
+                <input id="f-tags" type="text" placeholder="接梗,语气" autocomplete="off" />
+                <button id="f-tags-auto" type="button" class="ghost tag-auto-btn" title="用向量模型自动识别标签">自动识别</button>
+              </div>
+              <span id="f-tags-err" class="field-err hidden" aria-live="polite"></span>
+            </div>
             <label class="field narrow">
               <span>权重 <em>越高越优先注入</em></span>
               <input id="f-weight" type="number" step="0.1" min="0" max="5" value="1.5" />
@@ -217,6 +221,6 @@
       </div>
     </div>
 
-    <script type="module" src="./app.v5402.js?v=5413"></script>
+    <script type="module" src="./app.v5402.js?v=5416"></script>
   </body>
 </html>
